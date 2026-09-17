@@ -460,7 +460,6 @@ async function getById(id, logContext = {}) {
         stoneTypes: deriveStoneTypes(details.stoneConfig?.stoneTeams),
         metalColourBreakdown: deriveMetalColourBreakdown(details.metalConfig?.metalOptions),
         existingRequests,
-        baseDesignDetails: details,
       };
     },
     {
@@ -770,6 +769,14 @@ async function moldMatchedComponentSet(row, { baseDesignDetails, caratValue } = 
 
   return {
     componentSetId: row.componentSetId,
+    // Real, human-recognizable SKU/variant number (e.g. "RN0045167") — CONFUSINGLY, CAD's own
+    // component_set_details JSONB ALSO has a field literally named "componentSetId" holding this,
+    // distinct from the outer/technical `component_set_id` column used everywhere else in this
+    // integration (image_request/variant_task/cad-file-uploaded/pending-cad-files, and CAD's own
+    // /:id routes). Added 2026-09-17 — the real wireframe's "Variant Number" label needs THIS
+    // value, not the technical id; without it, CAD's team (and anyone else) has no way to
+    // recognize which physical piece a request is even about. See GAPS.md/RULES.md.
+    variantNumber: d.componentSetId,
     ornamentName: d.ornamentName,
     variantType: d.componentSetPrefix,
     category: d.category,

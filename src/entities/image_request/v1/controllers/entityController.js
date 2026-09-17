@@ -176,4 +176,12 @@ async function getByStats(req, res, next) {
   }
 }
 
-module.exports = { create, bulkCreate, getById, getAll, update, deleteEntity, addRequestedVariant, getVariantsDetail, getDashboard, getByStats };
+async function getPendingCadFiles(req, res, next) {
+  const { correlationId } = req.correlationContext || {};
+  try {
+    const result = await entityService.getPendingCadFiles({ correlationId, processName: `GetPendingCadFiles_${entityName}` });
+    return res.status(result.status).json({ status: result.status, data: result.data });
+  } catch (error) { next(error); }
+}
+
+module.exports = { create, bulkCreate, getById, getAll, update, deleteEntity, addRequestedVariant, getVariantsDetail, getDashboard, getByStats, getPendingCadFiles };

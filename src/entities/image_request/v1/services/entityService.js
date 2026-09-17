@@ -5,7 +5,7 @@ const _ = require('lodash');
 const path = require('path');
 const logger = require('../../../../common/v1/utils/logger');
 const mainConfig = require('../../../../../config/config');
-const { fetchJson, putJson } = require('../../../../common/v1/utils/httpClient');
+const { fetchJson } = require('../../../../common/v1/utils/httpClient');
 
 // --------------------
 // Auto-import global Sequelize instance
@@ -155,42 +155,20 @@ function validateRequestedVariantsArray(requestedVariants) {
 }
 
 // --------------------
-// Visualization -> CAD notification — see ARCHITECTURE.md's "CAD <-> Visualization integration".
-// Fires once per requestedVariant right after a NEW image_request is created (only trigger point
-// for now, per manager's confirmation still pending on the "add to an existing open request" case
-// — see GAPS.md). Reuses CAD's own existing generic update() endpoint (PUT /api/component_set/v1/
-// update/:id) directly, no new API needed on CAD's side. Best-effort, fire-and-forget — mirrors the
-// same direct-call reliability tradeoff already accepted for the CAD -> Visualization direction:
-// a failed notification is logged and swallowed, never allowed to fail or delay create()'s own
-// response.
+// Visualization <-> CAD signal — see ARCHITECTURE.md's "CAD <-> Visualization integration".
+// Manager decided (2026-09-17) AGAINST writing to CAD's component_set at all — it's master data,
+// not Visualization's to touch. Manager ALSO decided the GCS path itself belongs on the variant
+// inside the visualization request (not just a flag) — the visualization team needs to see the
+// actual document while working a variant. So every requestedVariant entry is stamped
+// `cadFilePath: null` the moment it's recorded here, and set to the real URL in place by
+// variant_task's `handleCadFileUploaded` (see that file) once CAD calls the existing
+// `POST /api/variant_task/v1/cad-file-uploaded` — no outbound call from this side at all, no
+// CAD url/config needed. Presence of a non-null path IS the "uploaded" signal — deliberately no
+// separate boolean (would just be a second field that can drift out of sync with this one for no
+// benefit — see GAPS.md).
 // --------------------
-function cadComponentSetUpdateUrl(componentSetId) {
-  if (!mainConfig.urls.cad) {
-    throw new Error('CAD url is not configured (see .env / config/config.js urls.cad)');
-  }
-  return `${mainConfig.urls.cad}/api/component_set/v1/update/${componentSetId}`;
-}
-
-async function notifyCadOfRequestedVariants(requestedVariants, logContext = {}) {
-  const requestedAt = new Date().toISOString();
-  await Promise.all(requestedVariants.map(async (variant) => {
-    try {
-      await putJson(cadComponentSetUpdateUrl(variant.componentSetId), {
-        component_set_details: {
-          visualizationRequested: true,
-          visualizationRequestedAt: requestedAt,
-        },
-      });
-    } catch (err) {
-      logger.error({
-        message: `NotifyCad_${entityName}: failed to notify CAD for componentSetId '${variant.componentSetId}': ${err.message}`,
-        messageType: 'EVENT',
-        processName: logContext.processName || `NotifyCad_${entityName}`,
-        correlationId: logContext.correlationId,
-        metadata: { entityName, componentSetId: variant.componentSetId },
-      });
-    }
-  }));
+function stampCadFilePending(variant) {
+  variant.cadFilePath = null;
 }
 
 async function create(data, logContext = {}) {
@@ -200,8 +178,9 @@ async function create(data, logContext = {}) {
   const details = data[detailsField] || data;
   const requestedVariants = Array.isArray(details.requestedVariants) ? details.requestedVariants : [];
   if (requestedVariants.length > 0) validateRequestedVariantsArray(requestedVariants);
+  requestedVariants.forEach(stampCadFilePending);
 
-  const result = await executeOperation(
+  return executeOperation(
     () =>
       model.create({
         [detailsField]: details,
@@ -216,18 +195,22 @@ async function create(data, logContext = {}) {
       metadata: { entityName, version },
     }
   );
-
-  if (result.status >= 200 && result.status < 300 && requestedVariants.length > 0) {
-    notifyCadOfRequestedVariants(requestedVariants, logContext).catch(() => {});
-  }
-
-  return result;
 }
 
+// Mirrors create()'s own requestedVariants handling (added 2026-09-17 — previously bulkCreate
+// skipped the per-array duplicate-variant check entirely, silently diverging from create() for any
+// caller that raises requests with an initial basket via this route instead).
 async function bulkCreate(dataArray, logContext = {}) {
   const model = getEntityModel();
   const idField = getEntityIdField();
   const detailsField = getDetailsField();
+
+  for (const d of dataArray) {
+    const details = d[detailsField] || d;
+    const requestedVariants = Array.isArray(details.requestedVariants) ? details.requestedVariants : [];
+    if (requestedVariants.length > 0) validateRequestedVariantsArray(requestedVariants);
+    requestedVariants.forEach(stampCadFilePending);
+  }
 
   return executeOperation(
     () =>
@@ -438,6 +421,7 @@ async function addRequestedVariant(id, variant, logContext = {}) {
     throw badRequest(`This variant (componentSetId '${variant.componentSetId}' with the same colours) is already in this request`);
   }
 
+  stampCadFilePending(variant);
   const newDetails = { ...details, requestedVariants: [...existing, variant] };
 
   return executeOperation(
@@ -787,6 +771,82 @@ async function getByStats(statsStatus, page = 1, pageSize = 20, logContext = {})
   );
 }
 
+// GET /pending-cad-files — added 2026-09-17 so CAD has a way to discover which componentSetIds
+// are actually waiting on a CAD file, rather than relying on someone telling them out-of-band.
+// Scans every requestedVariants entry across every image_request (same "compute in JS, not SQL"
+// pattern as getDashboard/getByStats — Postgres JSONB filterQuery can't express "does any array
+// element have cadFilePath: null"), filters to entries where cadFilePath is still falsy, and
+// dedupes by componentSetId (the SAME componentSetId can sit in more than one open request's
+// basket). componentSetId already uniquely determines the resolved metal/stone/size combo (that's
+// what match-component-set resolves it BY), so metalTeamCode/stoneTeamCode/dimensionalSelection
+// are identical across every request referencing the same componentSetId — taken once, not merged.
+// requestedBy/imageRequestId genuinely differ per request (two different people can ask for the
+// same variant), so those are collected as arrays. priority escalates to 'Rush' if ANY matching
+// request is Rush, and neededBy takes the earliest date across matches, so CAD's own queue can
+// still prioritize sensibly. ornamentName/collectionNumber come from the same Merchandising
+// lookup+cache getByStats already uses (fetchBaseDesignDisplayInfo) — only for the componentSetIds
+// actually returned, not every base_design in the catalog.
+async function getPendingCadFiles(logContext = {}) {
+  const model = getEntityModel();
+  const detailsField = getDetailsField();
+
+  return executeOperation(
+    async () => {
+      const allRequests = await model.findAll();
+
+      const byComponentSetId = {};
+      for (const req of allRequests) {
+        const details = req[detailsField] || {};
+        const requestedVariants = Array.isArray(details.requestedVariants) ? details.requestedVariants : [];
+
+        for (const variant of requestedVariants) {
+          if (variant.cadFilePath) continue; // already has a path — not pending
+
+          const existing = byComponentSetId[variant.componentSetId];
+          if (!existing) {
+            byComponentSetId[variant.componentSetId] = {
+              componentSetId: variant.componentSetId,
+              variantNumber: variant.variantNumber,
+              baseDesignId: details.baseDesignId,
+              metalTeamCode: variant.metalTeamCode,
+              stoneTeamCode: variant.stoneTeamCode,
+              dimensionalSelection: variant.dimensionalSelection,
+              priority: details.priority,
+              neededBy: details.neededBy,
+              requestedBy: details.requestedBy ? [details.requestedBy] : [],
+              imageRequestIds: [req[getEntityIdField()]],
+            };
+          } else {
+            if (details.priority === 'Rush') existing.priority = 'Rush';
+            if (details.neededBy && (!existing.neededBy || details.neededBy < existing.neededBy)) {
+              existing.neededBy = details.neededBy;
+            }
+            if (details.requestedBy && !existing.requestedBy.includes(details.requestedBy)) {
+              existing.requestedBy.push(details.requestedBy);
+            }
+            existing.imageRequestIds.push(req[getEntityIdField()]);
+          }
+        }
+      }
+
+      const rows = Object.values(byComponentSetId);
+      return Promise.all(rows.map(async (row) => {
+        const displayInfo = row.baseDesignId ? await fetchBaseDesignDisplayInfo(row.baseDesignId) : null;
+        return {
+          ...row,
+          ornamentName: displayInfo?.ornamentName,
+          collectionNumber: displayInfo?.collectionNumber,
+        };
+      }));
+    },
+    {
+      processName: logContext.processName || `GetPendingCadFiles_${entityName}`,
+      correlationId: logContext.correlationId,
+      metadata: { entityName },
+    }
+  );
+}
+
 module.exports = {
   getAll,
   getById,
@@ -800,4 +860,5 @@ module.exports = {
   getVariantsDetail,
   getDashboard,
   getByStats,
+  getPendingCadFiles,
 };

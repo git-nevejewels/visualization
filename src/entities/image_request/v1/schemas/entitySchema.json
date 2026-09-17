@@ -33,6 +33,10 @@
         "type": "object",
         "properties": {
           "componentSetId": { "type": "string", "minLength": 1 },
+          "variantNumber": {
+            "type": "string",
+            "description": "The real, human-recognizable SKU/variant number (e.g. \"RN0045167\") — CAD's own component_set_details.componentSetId field, NOT the same as this entry's own `componentSetId` above (that's the technical/internal id, used for all API calls). Added 2026-09-17 so CAD's team (via pending-cad-files) and any UI can recognize which physical piece a request is about, instead of only ever seeing the internal id. Sourced from match-component-set's own `variantNumber` field at raise-request time — optional here (older callers may omit it) but should always be passed when available."
+          },
           "metalTeamId": { "type": "string", "minLength": 1 },
           "metalTeamCode": { "type": "string", "minLength": 1 },
           "stoneTeamId": { "type": "string", "minLength": 1 },
@@ -50,6 +54,10 @@
             "type": "array",
             "minItems": 1,
             "items": { "type": "string" }
+          },
+          "cadFilePath": {
+            "type": ["string", "null"],
+            "description": "Server-stamped `null` (never sent by the client) the moment this entry is recorded, and set to the FG CAD shared-drive path string in place by variant_task's handleCadFileUploaded once CAD calls POST /api/variant_task/v1/cad-file-uploaded with this componentSetId + cadFilePath. NOT a cloud/GCS URL — there is no file upload anywhere in this flow (manager decision 2026-09-17): the CAD user pastes an existing shared-drive path into a plain textbox on CAD's side, and that exact string is copied through unchanged. Manager also decided this path belongs on the variant itself (the visualization team needs to see the actual document reference while working it), NOT on CAD's own component_set (master data). Presence of a non-null value IS the 'uploaded' signal — deliberately no separate boolean. See GAPS.md/RULES.md."
           }
         },
         "required": [

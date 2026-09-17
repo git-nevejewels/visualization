@@ -35,7 +35,6 @@ module.exports = {
   urls: {
     merchandising: process.env.MERCHANDISING,
     mdm: process.env.MDM,
-    cad: process.env.CAD,
   },
 
   // ---------------------

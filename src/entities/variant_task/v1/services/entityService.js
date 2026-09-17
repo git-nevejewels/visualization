@@ -537,13 +537,18 @@ async function bulkPerformAction(ids, action, payload = {}, logContext = {}) {
 }
 
 // POST /api/variant_task/v1/cad-file-uploaded — called by CAD's own service directly
-// (service-to-service, not through the BFF), as the LAST step of their own CAD-file-upload handler
-// — after the file is already saved to GCS and `component_set_details.componentSetCadPath` is
-// already set. This is a fire-and-forget NOTIFICATION, not a file transfer — no file bytes ever
-// pass through Visualization. CAD has NO concept of Visualization's own `image_request` entity or
+// (service-to-service, not through the BFF), right after their CAD user pastes the FG CAD file's
+// existing shared-drive path into a plain textbox on CAD's side and
+// `component_set_details.componentSetCadPath` is set to that same string. Manager decision
+// 2026-09-17 (revised further 2026-09-17): there is NO cloud upload anywhere in this flow — CAD
+// users already save .3dm files to an existing "FG CAD" shared drive; `cadFilePath` is just that
+// path string, copied through unchanged. This is a fire-and-forget NOTIFICATION, not a file
+// transfer — no file bytes ever pass through Visualization, and never did. CAD has NO concept of
+// Visualization's own `image_request` entity or
 // `imageRequestId` (confirmed 2026-09-16 by reading D:\work\cad in full — no match anywhere for
 // "image_request"/"imageRequestId"/"visualization"/"FG Ready" — see GAPS.md), so this takes ONLY
-// `componentSetId` and resolves which image_request(s) are actually waiting on it ITSELF.
+// `componentSetId` (+ `cadFilePath`, see below) and resolves which image_request(s) are actually
+// waiting on it ITSELF.
 //
 // The same componentSetId can legitimately sit in more than one open request's own basket (two
 // different people raising separate requests that happen to pick the same variant) — this creates
@@ -560,15 +565,22 @@ async function bulkPerformAction(ids, action, payload = {}, logContext = {}) {
 // the known risk (a failed/never-retried call silently leaves a variant stuck with no zb task) is
 // accepted for now rather than building a poller against the shared component_set table; revisit
 // if that risk turns out to matter in practice.
-async function handleCadFileUploaded(componentSetId, logContext = {}) {
+async function handleCadFileUploaded(componentSetId, cadFilePath, logContext = {}) {
   if (!componentSetId) {
     const err = new Error('componentSetId is required');
+    err.status = 400;
+    throw err;
+  }
+  if (!cadFilePath) {
+    const err = new Error('cadFilePath is required');
     err.status = 400;
     throw err;
   }
 
   const imageRequestModel = defaultSequelize.models['image_request'];
   if (!imageRequestModel) throw new Error('Model not loaded: image_request');
+  const imageRequestHistoryModel = defaultSequelize.models['image_request_history'];
+  if (!imageRequestHistoryModel) throw new Error('Model not loaded: image_request_history');
 
   const model = getEntityModel();
   const detailsField = getDetailsField();
@@ -590,6 +602,30 @@ async function handleCadFileUploaded(componentSetId, logContext = {}) {
         const details = req.image_request_details || {};
         const variant = (details.requestedVariants || []).find(v => v.componentSetId === componentSetId);
         if (!variant) continue; // shouldn't happen given the containment match above, but don't trust it blindly
+
+        // Manager decision 2026-09-17: this path (a plain FG-CAD shared-drive path string the CAD
+        // user pastes in — no cloud upload anywhere in this flow) belongs on the variant itself
+        // inside the visualization request, NOT on CAD's own component_set (master data) — the
+        // visualization team needs to see the actual document reference while working a variant,
+        // not just a flag. Its presence IS the "uploaded" signal (no separate boolean). Sets it on
+        // every entry matching this componentSetId (it can legitimately appear more than once in the same basket with
+        // different colour selections). Builds a NEW array rather than mutating `details` in
+        // place, so the history row below still captures the pre-update state.
+        const updatedRequestedVariants = (details.requestedVariants || []).map(v =>
+          v.componentSetId === componentSetId && v.cadFilePath !== cadFilePath
+            ? { ...v, cadFilePath }
+            : v
+        );
+        if (!_.isEqual(updatedRequestedVariants, details.requestedVariants)) {
+          await imageRequestHistoryModel.create({
+            image_request_id: req.image_request_id,
+            image_request_details: details,
+            updated_fields: ['requestedVariants'],
+            status: req.status,
+            api_version: req.api_version,
+          });
+          await req.update({ image_request_details: { ...details, requestedVariants: updatedRequestedVariants } });
+        }
 
         const existingTask = await model.findOne({
           where: {

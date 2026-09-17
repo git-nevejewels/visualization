@@ -247,22 +247,30 @@ router.post('/bulk-action', entityController.bulkPerformAction);
  * @swagger
  * /api/variant_task/v1/cad-file-uploaded:
  *   post:
- *     summary: Notification from CAD once a CAD file has been uploaded for a componentSetId
+ *     summary: Notification from CAD once componentSetCadPath is set for a componentSetId
  *     description: |
- *       Called by CAD's own service DIRECTLY (service-to-service, not through the BFF) as the LAST
- *       step of their own CAD-file-upload handler — after the file is already saved to GCS and
- *       `component_set_details.componentSetCadPath` is already set on their side. This is a
- *       fire-and-forget NOTIFICATION only — no file bytes ever pass through Visualization.
+ *       Called by CAD's own service DIRECTLY (service-to-service, not through the BFF) right after
+ *       their CAD user pastes the FG CAD file's existing shared-drive path into a plain textbox on
+ *       CAD's side and `component_set_details.componentSetCadPath` is set to that same string.
+ *       There is NO cloud upload anywhere in this flow (manager decision 2026-09-17) — CAD users
+ *       already save .3dm files to an existing "FG CAD" shared drive; `cadFilePath` here is just
+ *       that path string, copied through unchanged. This is a fire-and-forget NOTIFICATION only —
+ *       no file bytes ever pass through Visualization, and never did.
  *
  *       CAD has no concept of Visualization's own `image_request`/`imageRequestId` (confirmed by
- *       reading D:\work\cad in full — see GAPS.md), so this takes ONLY `componentSetId` and
- *       resolves which image_request(s) are actually waiting on it itself. Creates a `zb`
- *       variant_task for EVERY open request whose basket contains this componentSetId and doesn't
- *       already have one (the same componentSetId can legitimately sit in more than one open
- *       request). Zero matches is a valid no-op, not an error.
+ *       reading D:\work\cad in full — see GAPS.md), so this takes `componentSetId` + `cadFilePath`
+ *       and resolves which image_request(s) are actually waiting on it itself. Sets `cadFilePath`
+ *       on every matching `requestedVariants` entry across those requests (manager decision
+ *       2026-09-17: the path belongs on the variant inside the visualization request, NOT on CAD's
+ *       own component_set — the visualization team needs to see the actual document while working
+ *       a variant, not just a flag; see GAPS.md/RULES.md), then creates a `zb` variant_task for
+ *       EVERY open request whose basket contains this componentSetId and doesn't already have one
+ *       (the same componentSetId can legitimately sit in more than one open request). Zero matches
+ *       is a valid no-op, not an error.
  *
  *       Idempotent — safe for CAD to retry this call if it fails; re-calling for a componentSetId
- *       that already has a `zb` task for a given request just skips that request.
+ *       that already has a `zb` task for a given request just skips creating another one (the
+ *       `cadFilePath` update itself is applied every time, harmlessly, if it ever changes).
  *     tags: [VariantTask]
  *     requestBody:
  *       required: true
@@ -272,12 +280,13 @@ router.post('/bulk-action', entityController.bulkPerformAction);
  *             type: object
  *             properties:
  *               componentSetId: { type: string }
- *             required: [componentSetId]
+ *               cadFilePath: { type: string, description: "The existing FG CAD shared-drive path the CAD user pasted in, e.g. \\\\fileserver\\FG_CAD\\...\\file.3dm — copied through verbatim, never validated as a URL" }
+ *             required: [componentSetId, cadFilePath]
  *     responses:
  *       200:
  *         description: "{ componentSetId, createdFor: [imageRequestId], alreadyExistedFor: [imageRequestId] }"
  *       400:
- *         description: componentSetId is required
+ *         description: componentSetId or cadFilePath is missing
  */
 router.post('/cad-file-uploaded', entityController.handleCadFileUploaded);
 

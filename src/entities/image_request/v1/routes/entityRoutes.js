@@ -175,6 +175,39 @@ router.get('/getByStats', entityController.getByStats);
 
 /**
  * @swagger
+ * /api/image_request/v1/pending-cad-files:
+ *   get:
+ *     summary: componentSetIds still waiting on a CAD file path, for CAD's own team to discover
+ *     description: |
+ *       Registered BEFORE GET /{id} for the same routing-order reason as /dashboard/getByStats
+ *       above. Added 2026-09-17 so CAD has a way to find out which componentSetIds are actually
+ *       waiting on a CAD file, instead of relying on someone telling them out-of-band — CAD polls
+ *       this, then calls their own POST /api/component_set/v1/:id/cad-file-path for each one once
+ *       the file is ready.
+ *
+ *       Scans every requestedVariants entry across every image_request (computed in JS, same as
+ *       dashboard/getByStats — Postgres JSONB filterQuery can't express "does any array element
+ *       have cadFilePath: null") and returns entries where `cadFilePath` is still falsy, DEDUPED by
+ *       componentSetId — the same componentSetId can sit in more than one open request's basket,
+ *       and CAD only cares about the componentSetId itself, never our internal imageRequestId.
+ *       When duplicates collapse: priority escalates to 'Rush' if ANY matching request is Rush,
+ *       neededBy takes the earliest date across matches, requestedBy/imageRequestIds collect every
+ *       distinct requester/request waiting on it (metalTeamCode/stoneTeamCode/dimensionalSelection
+ *       are NOT merged — componentSetId already uniquely determines them, so they're identical
+ *       across every matching request and taken once). ornamentName/collectionNumber come from the
+ *       same Merchandising lookup+cache getByStats already uses.
+ *     tags: [ImageRequest]
+ *     responses:
+ *       200:
+ *         description: >
+ *           [{ componentSetId, baseDesignId, ornamentName, collectionNumber, metalTeamCode,
+ *             stoneTeamCode, dimensionalSelection, priority, neededBy, requestedBy: [...],
+ *             imageRequestIds: [...] }]
+ */
+router.get('/pending-cad-files', entityController.getPendingCadFiles);
+
+/**
+ * @swagger
  * /api/image_request/v1/{id}:
  *   get:
  *     summary: Get a single Image Request by ID

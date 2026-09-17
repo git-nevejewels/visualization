@@ -157,8 +157,8 @@ async function bulkPerformAction(req, res, next) {
 async function handleCadFileUploaded(req, res, next) {
   const { correlationId } = req.correlationContext || {};
   try {
-    const { componentSetId } = req.body || {};
-    const result = await entityService.handleCadFileUploaded(componentSetId,
+    const { componentSetId, cadFilePath } = req.body || {};
+    const result = await entityService.handleCadFileUploaded(componentSetId, cadFilePath,
       { correlationId, processName: `HandleCadFileUploaded_${entityName}` });
     return res.status(result.status).json({ status: result.status, data: result.data });
   } catch (error) {
