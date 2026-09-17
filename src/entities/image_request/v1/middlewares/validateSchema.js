@@ -95,8 +95,8 @@ const validateEntity = (req, res, next) => {
         metadata: { entityName, schemaPath },
       });
       return res.status(500).json({
-        status: 'error',
-        message: `Validation schema missing for entity: ${entityName}`,
+        status: 500,
+        error: `Validation schema missing for entity: ${entityName}`,
       });
     }
 
@@ -124,8 +124,8 @@ const validateEntity = (req, res, next) => {
         metadata: { entityName, validationErrors: error.details },
       });
       return res.status(400).json({
-        status: 'error',
-        message: 'Validation failed',
+        status: 400,
+        error: 'Validation failed',
         details: error.details,
         correlationId,
       });
@@ -143,8 +143,8 @@ const validateEntity = (req, res, next) => {
       error: err,
     });
     return res.status(500).json({
-      status: 'error',
-      message: 'Internal server error during validation',
+      status: 500,
+      error: 'Internal server error during validation',
     });
   }
 };

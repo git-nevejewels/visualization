@@ -23,7 +23,7 @@ async function getById(req, res, next) {
   const { correlationId } = req.correlationContext || {};
   try {
     const result = await entityService.getById(req.params.id, { correlationId, processName: 'GetById_base_design' });
-    if (!result.data) return res.status(result.status || 404).json({ status: 'error', message: 'base_design not found', correlationId });
+    if (!result.data) return res.status(result.status || 404).json({ status: result.status || 404, error: 'base_design not found', correlationId });
     return res.status(result.status).json({ status: result.status, data: result.data });
   } catch (error) { next(error); }
 }
@@ -36,7 +36,7 @@ async function getOptions(req, res, next) {
     // together — validated before executeOperation, per this repo's own established pattern (see
     // RULES.md: validate before, never inside, the callback).
     if ((stoneType !== undefined && shape === undefined) || (stoneType === undefined && shape !== undefined)) {
-      return res.status(400).json({ status: 'error', message: 'stoneType and shape must be provided together', correlationId });
+      return res.status(400).json({ status: 400, error: 'stoneType and shape must be provided together', correlationId });
     }
 
     let metalSelections;
@@ -44,7 +44,7 @@ async function getOptions(req, res, next) {
       try {
         metalSelections = JSON.parse(metalSelectionsRaw);
       } catch {
-        return res.status(400).json({ status: 'error', message: 'metalSelections must be valid JSON, e.g. {"Band Width":"Classic","Ring Size":"I"}', correlationId });
+        return res.status(400).json({ status: 400, error: 'metalSelections must be valid JSON, e.g. {"Band Width":"Classic","Ring Size":"I"}', correlationId });
       }
     }
 
@@ -53,7 +53,7 @@ async function getOptions(req, res, next) {
       const message = stoneType
         ? `base_design not found, has no component_set variants yet, or no stone team matches stoneType=${stoneType}/shape=${shape}`
         : 'base_design not found, or has no component_set variants yet';
-      return res.status(result.status || 404).json({ status: 'error', message, correlationId });
+      return res.status(result.status || 404).json({ status: result.status || 404, error: message, correlationId });
     }
     return res.status(result.status).json({ status: result.status, data: result.data });
   } catch (error) { next(error); }
@@ -67,15 +67,15 @@ async function matchComponentSet(req, res, next) {
       { correlationId, processName: 'MatchComponentSet_base_design' });
     if (!result.data) {
       return res.status(result.status || 404).json({
-        status: 'error',
-        message: `No component_set matches metalTeamCode=${metalTeamCode}/stoneTeamCode=${stoneTeamCode}${caratValue !== undefined ? `/caratValue=${caratValue}` : ''} for base_design ${req.params.id}`,
+        status: result.status || 404,
+        error: `No component_set matches metalTeamCode=${metalTeamCode}/stoneTeamCode=${stoneTeamCode}${caratValue !== undefined ? `/caratValue=${caratValue}` : ''} for base_design ${req.params.id}`,
         correlationId,
       });
     }
     return res.status(result.status).json({ status: result.status, data: result.data });
   } catch (error) {
     if (error.status === 400) {
-      return res.status(400).json({ status: 'error', message: error.message, correlationId });
+      return res.status(400).json({ status: 400, error: error.message, correlationId });
     }
     next(error);
   }

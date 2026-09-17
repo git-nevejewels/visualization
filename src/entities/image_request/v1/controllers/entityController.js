@@ -50,9 +50,9 @@ async function getById(req, res, next) {
     const entityId = req.params.id;
     const { fields = '', filterQuery = '{}' } = req.query;
     let parsedFilterQuery = {};
-    try { parsedFilterQuery = JSON.parse(filterQuery); } catch { return res.status(400).json({ error: 'Invalid filterQuery' }); }
+    try { parsedFilterQuery = JSON.parse(filterQuery); } catch { return res.status(400).json({ status: 400, error: 'Invalid filterQuery', correlationId }); }
     const entity = await entityService.getById(entityId, fields, parsedFilterQuery, { correlationId, processName: `GetById_${entityName}` });
-    if (!entity) return res.status(404).json({ message: 'Entity not found' });
+    if (!entity.data) return res.status(entity.status || 404).json({ status: entity.status || 404, error: 'Entity not found', correlationId });
     return res.status(entity.status).json({ status: entity.status, data: entity.data });
   } catch (error) { next(error); }
 }
@@ -63,8 +63,8 @@ async function getAll(req, res, next) {
     const page = parseInt(req.query.pageNumber, 10) || 1;
     const pageSize = parseInt(req.query.batchSize, 10) || 10;
     const fields = req.query.fields || '';
-    let filterQuery = {}; if (req.query.filterQuery) { try { filterQuery = JSON.parse(req.query.filterQuery); } catch { return res.status(400).json({ error: 'Invalid filterQuery' }); } }
-    let searchQuery = {}; if (req.query.search) { try { searchQuery = JSON.parse(req.query.search); } catch { return res.status(400).json({ error: 'Invalid search' }); } }
+    let filterQuery = {}; if (req.query.filterQuery) { try { filterQuery = JSON.parse(req.query.filterQuery); } catch { return res.status(400).json({ status: 400, error: 'Invalid filterQuery', correlationId }); } }
+    let searchQuery = {}; if (req.query.search) { try { searchQuery = JSON.parse(req.query.search); } catch { return res.status(400).json({ status: 400, error: 'Invalid search', correlationId }); } }
     const result = await entityService.getAll(page, pageSize, filterQuery, fields, searchQuery, { correlationId, processName: `GetAll_${entityName}` });
     return res.status(result.status).json({ status: result.status, data: result.data?.rows || [], pagination: { batchSize: pageSize, pageNo: page, totalCount: result.data?.count || 0 } });
   } catch (error) { next(error); }
@@ -114,7 +114,7 @@ async function addRequestedVariant(req, res, next) {
       { correlationId, processName: `AddRequestedVariant_${entityName}` });
 
     if (!result.data) {
-      return res.status(result.status || 404).json({ status: 'error', message: 'Entity not found', correlationId });
+      return res.status(result.status || 404).json({ status: result.status || 404, error: 'Entity not found', correlationId });
     }
 
     await publishDomainEvent(entityName, 'updated', version, result.data.toJSON ? result.data.toJSON() : result.data,
@@ -123,7 +123,7 @@ async function addRequestedVariant(req, res, next) {
     return res.status(result.status).json({ status: result.status, data: result.data });
   } catch (error) {
     if (error.status === 400) {
-      return res.status(400).json({ status: 'error', message: error.message, correlationId });
+      return res.status(400).json({ status: 400, error: error.message, correlationId });
     }
     next(error);
   }
@@ -136,7 +136,7 @@ async function getVariantsDetail(req, res, next) {
   const { correlationId } = req.correlationContext || {};
   try {
     const result = await entityService.getVariantsDetail(req.params.id, { correlationId, processName: `GetVariantsDetail_${entityName}` });
-    if (!result.data) return res.status(result.status || 404).json({ status: 'error', message: 'Entity not found', correlationId });
+    if (!result.data) return res.status(result.status || 404).json({ status: result.status || 404, error: 'Entity not found', correlationId });
     return res.status(result.status).json({ status: result.status, data: result.data });
   } catch (error) { next(error); }
 }
@@ -154,7 +154,7 @@ async function getByStats(req, res, next) {
   try {
     const statsStatus = req.query.statsStatus;
     if (!statsStatus) {
-      return res.status(400).json({ status: 'error', message: 'statsStatus query parameter is required. Valid values: open, delivered, rush', correlationId });
+      return res.status(400).json({ status: 400, error: 'statsStatus query parameter is required. Valid values: open, delivered, rush', correlationId });
     }
 
     const page = parseInt(req.query.pageNumber, 10) || 1;
@@ -170,7 +170,7 @@ async function getByStats(req, res, next) {
     });
   } catch (error) {
     if (error.status === 400) {
-      return res.status(400).json({ status: 'error', message: error.message, correlationId });
+      return res.status(400).json({ status: 400, error: error.message, correlationId });
     }
     next(error);
   }
