@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "_comment": "DRAFT — derived from visualization_studio_v15.html's reqIndex()/submitReq() (request-level fields only: reqBy/due/priority/bdId). Per-variant rollups (variants, sets, stageDone, done) are NOT stored here — they are computed by querying variant_task rows whose imageRequestId matches this record's id, the same way design_request's own cadStats pattern works but across two entities instead of one JSONB blob. The top-level `status` column (In progress / Delivered / Cancelled) is intentionally left unconstrained here, matching design_request's own status column, since it will eventually be kept in sync by service logic reading variant_task state rather than set directly by a client.",
+  "properties": {
+    "baseDesignId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reference to a base_design row in the (read-only) Merchandising/PIM pim_local database — NOT a local foreign key. Wireframe field: bdId."
+    },
+    "requestedBy": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Person who raised the request. Wireframe field: reqBy / by."
+    },
+    "neededBy": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Target delivery date for the request. Wireframe field: due."
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["Standard", "Rush"],
+      "description": "Wireframe field: priority."
+    },
+    "status": {
+      "type": "string",
+      "description": "Declared here (unconstrained, like design_request's own entitySchema.json) purely so validateSchema.js — which validates the WHOLE request body against this file, not just the details sub-object — doesn't reject a create/update payload that also carries the top-level `status` column value."
+    },
+    "requestedVariants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "componentSetId": { "type": "string", "minLength": 1 },
+          "metalTeamId": { "type": "string", "minLength": 1 },
+          "metalTeamCode": { "type": "string", "minLength": 1 },
+          "stoneTeamId": { "type": "string", "minLength": 1 },
+          "stoneTeamCode": { "type": "string", "minLength": 1 },
+          "dimensionalSelection": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "metalColourGroups": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "enum": ["white", "yellow", "rose"] }
+          },
+          "stoneColours": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" }
+          }
+        },
+        "required": [
+          "componentSetId", "metalTeamId", "metalTeamCode", "stoneTeamId", "stoneTeamCode",
+          "dimensionalSelection", "metalColourGroups", "stoneColours"
+        ]
+      },
+      "description": "Variants selected against this request's base design, recorded at raise-request time — BEFORE any variant_task exists for them (variant_task is only created once FG CAD upload is confirmed, via a bff-for-app -> Visualization call; see ARCHITECTURE.md/GAPS.md). Whether a given entry here already has a variant_task is deliberately NOT tracked as a status field on the entry itself — it's derived by checking for a variant_task with a matching (imageRequestId, componentSetId), same principle as every other computed rollup in this codebase. Append via POST /api/image_request/v1/:id/variants, NOT the generic update() — update()'s lodash _.merge merges arrays index-by-index, not by appending, and would corrupt this list."
+    }
+  },
+  "required": [
+    "baseDesignId",
+    "requestedBy"
+  ]
+}

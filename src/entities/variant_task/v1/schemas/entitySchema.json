@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "_comment": "DRAFT (updated 2026-09-15) — derived from visualization_studio_v15.html's TASKS records and addTask()/setsOf(), cross-checked against the REAL component_set schema at D:\\work\\cad\\src\\entities\\component_set\\v1\\schemas\\entitySchema.json. One variant_task row = one (variant, stage) pair, matching the wireframe's own 'TASKS — one record per variant per stage' comment. Fields the wireframe stores per-REQUEST, not per-task (reqBy/due/priority), are still denormalized here as priority/neededBy for list/filter convenience, but imageRequestId is the source of truth. metalTeamId/metalTeamCode/stoneTeamId/stoneTeamCode are denormalized from the matched component_set, following that same codebase's own id+code convention (metalTeamId+metalTeamCode, stoneTeamId+stoneTeamCode appear together on every component_set row) — added specifically because the real dedup key for 'is this image already being produced' is (metalTeamId, stoneTeamId, metalColourGroup, stoneColour), not componentSetId alone. 'Image sets' are intentionally NOT a field or sub-table — the wireframe's own setsOf() computes them as metalColourGroups.length x stoneColours.length, 'information only, no status of its own'. The activity timeline (wireframe's per-task 'log') is not duplicated into this JSONB blob either — it's already covered by the generic variant_task_history table every update() call writes. Stage-conditional status enums (zb/obj: Ready/Assigned/In progress/On hold/Completed; rn adds Tool config/Keyshot/Photoshop before Completed) are intentionally left unconstrained on the top-level `status` column, same as design_request's own status column. STILL OPEN, not reflected here yet: whether a cadRequestId/CAD-readiness field belongs on this schema — pending confirmation of whether D:\\work\\cad's existing cad_request entity (CAD_REQUESTED..CAD_COMPLETED lifecycle, keyed by baseDesignId) is the 'separate CAD process' gating Z-Brush task creation.",
+  "properties": {
+    "imageRequestId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The image_request this task belongs to. Wireframe field: reqNo."
+    },
+    "baseDesignId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Denormalized reference to a base_design row in the (read-only) Merchandising/PIM pim_local database. Wireframe field: bdId."
+    },
+    "componentSetId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The matched variant/geometry — PIM component_set.componentSetId. Wireframe field: vno."
+    },
+    "metalTeamId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Denormalized from the matched component_set at the moment this variant is added, matching the id+code convention used throughout component_set/cad_request. Together with stoneTeamId + metalColourGroups + stoneColours, this is the real dedup key for 'is this image already being produced elsewhere' — see project memory's open dedup question."
+    },
+    "metalTeamCode": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Denormalized from the matched component_set (component_set.metalTeamCode), for display/reporting without a PIM round-trip."
+    },
+    "stoneTeamId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Denormalized from the matched component_set at the moment this variant is added — see metalTeamId."
+    },
+    "stoneTeamCode": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Denormalized from the matched component_set (component_set.stoneTeamCode), for display/reporting without a PIM round-trip."
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["zb", "obj", "rn"],
+      "description": "Which of the 3 pipeline stages this task record is for."
+    },
+    "dimensionalSelection": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "The DIMENSIONAL axis values that matched this componentSetId (axis id -> chosen value), e.g. {\"size\":\"M\",\"depth\":\"2.0mm\"}. Wireframe field: sel. Axis ids vary per base design, so this is intentionally open-ended."
+    },
+    "metalColourGroups": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "enum": ["white", "yellow", "rose"] },
+      "description": "Metal colour groups selected at request time — never affects the matched variant, only the render task's image set count. Wireframe field: groups."
+    },
+    "stoneColours": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "description": "Stone colours/types selected at request time (e.g. Diamond, Ruby). Wireframe field: stones."
+    },
+    "assignee": {
+      "type": "string",
+      "description": "Person currently assigned to this task, if any."
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["Standard", "Rush"],
+      "description": "Denormalized from the owning image_request, for list/filter convenience."
+    },
+    "neededBy": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Denormalized from the owning image_request, for list/filter convenience."
+    },
+    "status": {
+      "type": "string",
+      "description": "Declared here (unconstrained, like design_request's own entitySchema.json) purely so validateSchema.js — which validates the WHOLE request body against this file, not just the details sub-object — doesn't reject a create/update payload that also carries the top-level `status` column value."
+    }
+  },
+  "required": [
+    "imageRequestId",
+    "baseDesignId",
+    "componentSetId",
+    "metalTeamId",
+    "metalTeamCode",
+    "stoneTeamId",
+    "stoneTeamCode",
+    "stage",
+    "dimensionalSelection",
+    "metalColourGroups",
+    "stoneColours"
+  ]
+}
