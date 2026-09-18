@@ -113,34 +113,28 @@ router.post('/bulkCreate', validateEntity, entityController.bulkCreate);
  * @swagger
  * /api/image_request/v1/dashboard:
  *   get:
- *     summary: Overview KPIs across every Image Request
+ *     summary: The "Manage visualization requests" screen's ONE api — KPIs + filtered table
  *     description: |
+ *       Renamed from getByStats 2026-09-18 (see GAPS.md) — the old standalone GET /dashboard
+ *       (KPIs only, no table rows) was REMOVED entirely, not left dormant alongside this one. This
+ *       is now the only endpoint that screen calls: top KPI cards (`summary`) + the filtered,
+ *       paginated table (`data`) in one response.
+ *
  *       Registered BEFORE GET /{id} deliberately — Express matches routes in registration order,
  *       and /{id} (a param route) would otherwise capture the literal path "dashboard" as an id.
- *     tags: [ImageRequest]
- *     responses:
- *       200:
- *         description: openRequests, variantsInFlight, variantsDelivered, imageSetsOrdered, rushRequests, unassignedTasks
- */
-router.get('/dashboard', entityController.getDashboard);
-
-/**
- * @swagger
- * /api/image_request/v1/getByStats:
- *   get:
- *     summary: Get Image Requests filtered by rollup status
- *     description: |
- *       Registered BEFORE GET /{id} for the same routing-order reason as /dashboard above.
  *       'open'/'delivered' are computed by checking every requestedVariant's variant_task rows
  *       (not a stored field) — a variant with no variant_task yet counts as not-delivered.
  *
- *       Rows are molded for the "Manage visualization requests" dashboard table (2026-09-15) —
- *       NOT the raw entity row. `ornamentName`/`collectionNumber`/`collectionPrefix` come from
- *       Merchandising's base_design API (image_request itself only stores a bare `baseDesignId`
- *       reference). `stageProgress[stage].done` counts variants that have COMPLETED that stage
- *       (moved past it) — e.g. `zb.done` counts variants now at obj, rn, or Delivered.
- *       `whereItIsNow` counts variants by where they CURRENTLY sit (their current stage, Delivered,
- *       or `awaitingCad` if no variant_task exists yet).
+ *       Rows are molded for the table (2026-09-15) — NOT the raw entity row.
+ *       `ornamentName`/`collectionNumber`/`collectionPrefix` come from Merchandising's base_design
+ *       API (image_request itself only stores a bare `baseDesignId` reference).
+ *       `stageProgress[stage].done` counts variants that have COMPLETED that stage (moved past
+ *       it) — e.g. `zb.done` counts variants now at obj, rn, or Delivered. `whereItIsNow` counts
+ *       variants by where they CURRENTLY sit (their current stage, Delivered, or `awaitingCad` if
+ *       no variant_task exists yet). `summary` is the same shape the old standalone /dashboard
+ *       endpoint used to return (openRequests, variantsInFlight, variantsDelivered,
+ *       imageSetsOrdered, rushRequests, unassignedTasks), computed across ALL requests regardless
+ *       of the `statsStatus` filter applied to `data`.
  *     tags: [ImageRequest]
  *     parameters:
  *       - in: query
@@ -162,16 +156,18 @@ router.get('/dashboard', entityController.getDashboard);
  *     responses:
  *       200:
  *         description: >
- *           Filtered, molded list: [{ imageRequestId, baseDesignId, ornamentName, collectionNumber,
+ *           { data: [{ imageRequestId, baseDesignId, ornamentName, collectionNumber,
  *             collectionPrefix, requestedBy, neededBy, priority, status,
  *             scope: { variantCount, imageSetCount },
  *             stageProgress: { zb: {done,total}, obj: {done,total}, rn: {done,total} },
  *             whereItIsNow: { zb, obj, rn, delivered, awaitingCad },
- *             variantsDoneCount }]
+ *             variantsDoneCount }], pagination, filter,
+ *             summary: { openRequests, variantsInFlight, variantsDelivered, imageSetsOrdered,
+ *               rushRequests, unassignedTasks } }
  *       400:
  *         description: Invalid or missing statsStatus
  */
-router.get('/getByStats', entityController.getByStats);
+router.get('/dashboard', entityController.getDashboard);
 
 /**
  * @swagger

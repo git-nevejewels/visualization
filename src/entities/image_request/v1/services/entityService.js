@@ -500,11 +500,15 @@ function summarizeVariant(requestedVariant, tasksForVariant) {
 
   return {
     componentSetId: requestedVariant.componentSetId,
+    variantNumber: requestedVariant.variantNumber,
+    ornamentName: requestedVariant.ornamentName,
     metalTeamId: requestedVariant.metalTeamId,
     metalTeamCode: requestedVariant.metalTeamCode,
     stoneTeamId: requestedVariant.stoneTeamId,
     stoneTeamCode: requestedVariant.stoneTeamCode,
     dimensionalSelection: requestedVariant.dimensionalSelection,
+    shape: requestedVariant.shape,
+    carat: requestedVariant.carat,
     metalColourGroups: requestedVariant.metalColourGroups,
     stoneColours: requestedVariant.stoneColours,
     imageSets,
@@ -536,6 +540,28 @@ function merchandisingUrl(path) {
 const BASE_DESIGN_DISPLAY_CACHE_TTL_MS = 5 * 60_000;
 const baseDesignDisplayCache = new Map(); // baseDesignId -> { data, fetchedAt }
 
+// Same metal colour classification rule as base_design's own deriveMetalColourBreakdown
+// (RULES.md) — duplicated here rather than cross-imported (no precedent for cross-entity service
+// imports in this codebase, see fetchBaseDesignDisplayInfo's own comment above). Returns the
+// ACTUAL metal names per group (not just a count) — the request detail screen needs to show e.g.
+// "White: Silver, White Gold 9kt, White Gold 14kt, White Gold 18kt, Platinum 950", not just
+// "5 metals". Same MIXED METALS exclusion as base_design's version.
+function classifyMetalColour(metalName) {
+  const lower = (metalName || '').toLowerCase();
+  if (lower.includes('platinum') || lower.includes('silver') || lower.includes('white')) return 'white';
+  if (lower.includes('rose')) return 'rose';
+  return 'yellow';
+}
+
+function deriveMetalColourNames(metalOptions = []) {
+  const breakdown = { white: [], yellow: [], rose: [] };
+  for (const opt of metalOptions) {
+    if (opt.isMixMetal) continue;
+    breakdown[classifyMetalColour(opt.metalName)].push(opt.metalName);
+  }
+  return breakdown;
+}
+
 async function fetchBaseDesignDisplayInfo(baseDesignId, logContext = {}) {
   const cached = baseDesignDisplayCache.get(baseDesignId);
   if (cached && (Date.now() - cached.fetchedAt) < BASE_DESIGN_DISPLAY_CACHE_TTL_MS) return cached.data;
@@ -547,11 +573,14 @@ async function fetchBaseDesignDisplayInfo(baseDesignId, logContext = {}) {
     if (err.status === 404) return null;
     throw err;
   }
-  const basicInformation = body.data?.base_design_details?.basicInformation || {};
+  const details = body.data?.base_design_details || {};
+  const basicInformation = details.basicInformation || {};
   const data = {
     ornamentName: basicInformation.ornamentName,
+    referenceDesignName: basicInformation.referenceDesignName,
     collectionNumber: basicInformation.collectionNumber,
     collectionPrefix: basicInformation.collectionPrefix,
+    metalColourBreakdown: deriveMetalColourNames(details.metalConfig?.metalOptions),
   };
   baseDesignDisplayCache.set(baseDesignId, { data, fetchedAt: Date.now() });
   return data;
@@ -596,7 +625,15 @@ function summarizeRequestRollup(requestedVariants, tasksByComponentSetId) {
   };
 }
 
-// GET /:id/variants — one row per requestedVariant, with its current stage/status.
+// GET /:id/variants — the request detail/drill-down screen: molded imageRequest header (same
+// display-info enrichment as a GET /dashboard row — ornamentName/referenceDesignName/
+// collectionNumber/collectionPrefix, since image_request itself only ever stores a bare
+// baseDesignId), its request-level stats-bar rollup (summarizeRequestRollup — variants/image-sets
+// ordered, per-stage done/total, variants delivered), the base_design's metalColourBreakdown (the
+// ACTUAL metal names per colour group, e.g. white -> [Silver, White Gold 9kt, ...] — constant for
+// every variant in this request since it's a base_design-level catalog, so returned once here
+// rather than duplicated on every row), and one row per requestedVariant with its current
+// stage/status (summarizeVariant).
 async function getVariantsDetail(id, logContext = {}) {
   const model = getEntityModel();
   const idField = getEntityIdField();
@@ -621,8 +658,28 @@ async function getVariantsDetail(id, logContext = {}) {
       }
 
       const variants = requestedVariants.map(rv => summarizeVariant(rv, tasksByComponentSetId[rv.componentSetId] || []));
+      const rollup = summarizeRequestRollup(requestedVariants, tasksByComponentSetId);
+      const displayInfo = details.baseDesignId ? await fetchBaseDesignDisplayInfo(details.baseDesignId, logContext) : null;
 
-      return { imageRequest: entity, variants };
+      return {
+        imageRequest: {
+          imageRequestId: entity[idField],
+          baseDesignId: details.baseDesignId,
+          ornamentName: displayInfo?.ornamentName,
+          referenceDesignName: displayInfo?.referenceDesignName,
+          collectionNumber: displayInfo?.collectionNumber,
+          collectionPrefix: displayInfo?.collectionPrefix,
+          requestedBy: details.requestedBy,
+          neededBy: details.neededBy,
+          priority: details.priority,
+          status: details.status,
+          scope: { variantCount: rollup.variantCount, imageSetCount: rollup.imageSetCount },
+          stageProgress: rollup.stageProgress,
+          variantsDoneCount: rollup.variantsDoneCount,
+        },
+        metalColourBreakdown: displayInfo?.metalColourBreakdown || { white: [], yellow: [], rose: [] },
+        variants,
+      };
     },
     {
       processName: logContext.processName || `GetVariantsDetail_${entityName}`,
@@ -632,62 +689,55 @@ async function getVariantsDetail(id, logContext = {}) {
   );
 }
 
-// GET /dashboard — overview KPIs across every image_request.
-async function getDashboard(logContext = {}) {
-  const model = getEntityModel();
-  const idField = getEntityIdField();
-  const detailsField = getDetailsField();
-  const taskModel = getVariantTaskModel();
+// Shared KPI computation — used by GET /dashboard (the merged endpoint, formerly getByStats).
+// REMOVED 2026-09-18: the old standalone GET /dashboard (KPIs only, no table rows) — the "Manage
+// visualization requests" screen only needs ONE API call now, not two. `getByStats` was renamed to
+// `getDashboard`/`/dashboard` and its response gained a `summary` key carrying exactly what the old
+// standalone endpoint used to return, computed from the SAME allRequests/allTasks/tasksByKey this
+// function already fetches for its own table-filtering — not a second pair of full-table scans.
+function computeDashboardSummary(allRequests, allTasks, tasksByKey, idField, detailsField) {
+  let openRequests = 0, rushRequests = 0, variantsInFlight = 0, variantsDelivered = 0, imageSetsOrdered = 0;
+  const unassignedTasks = allTasks.filter(t => (t.variant_task_details || {}).status === 'Ready').length;
 
-  return executeOperation(
-    async () => {
-      const allRequests = await model.findAll();
-      const allTasks = await taskModel.findAll();
+  for (const req of allRequests) {
+    const d = req[detailsField] || {};
+    const requestedVariants = Array.isArray(d.requestedVariants) ? d.requestedVariants : [];
+    if (d.priority === 'Rush') rushRequests++;
 
-      const tasksByKey = {};
-      for (const t of allTasks) {
-        const d = t.variant_task_details || {};
-        const key = `${d.imageRequestId}::${d.componentSetId}`;
-        (tasksByKey[key] = tasksByKey[key] || []).push(t);
-      }
-
-      let openRequests = 0, rushRequests = 0, variantsInFlight = 0, variantsDelivered = 0, imageSetsOrdered = 0;
-      const unassignedTasks = allTasks.filter(t => (t.variant_task_details || {}).status === 'Ready').length;
-
-      for (const req of allRequests) {
-        const d = req[detailsField] || {};
-        const requestedVariants = Array.isArray(d.requestedVariants) ? d.requestedVariants : [];
-        if (d.priority === 'Rush') rushRequests++;
-
-        let fullyDelivered = requestedVariants.length > 0;
-        for (const rv of requestedVariants) {
-          const tasks = tasksByKey[`${req[idField]}::${rv.componentSetId}`] || [];
-          const summary = summarizeVariant(rv, tasks);
-          imageSetsOrdered += summary.imageSets;
-          if (summary.currentStatus === 'Delivered') variantsDelivered++;
-          else { variantsInFlight++; fullyDelivered = false; }
-        }
-        if (!fullyDelivered) openRequests++;
-      }
-
-      return { openRequests, variantsInFlight, variantsDelivered, imageSetsOrdered, rushRequests, unassignedTasks };
-    },
-    {
-      processName: logContext.processName || `GetDashboard_${entityName}`,
-      correlationId: logContext.correlationId,
-      metadata: { entityName },
+    let fullyDelivered = requestedVariants.length > 0;
+    for (const rv of requestedVariants) {
+      const tasks = tasksByKey[`${req[idField]}::${rv.componentSetId}`] || [];
+      const summary = summarizeVariant(rv, tasks);
+      imageSetsOrdered += summary.imageSets;
+      if (summary.currentStatus === 'Delivered') variantsDelivered++;
+      else { variantsInFlight++; fullyDelivered = false; }
     }
-  );
+    if (!fullyDelivered) openRequests++;
+  }
+
+  return { openRequests, variantsInFlight, variantsDelivered, imageSetsOrdered, rushRequests, unassignedTasks };
 }
 
-// GET /getByStats?statsStatus=open|delivered|rush — mirrors design_request's own getByStats
+function buildTasksByKey(allTasks) {
+  const tasksByKey = {};
+  for (const t of allTasks) {
+    const d = t.variant_task_details || {};
+    const key = `${d.imageRequestId}::${d.componentSetId}`;
+    (tasksByKey[key] = tasksByKey[key] || []).push(t);
+  }
+  return tasksByKey;
+}
+
+// GET /dashboard?statsStatus=open|delivered|rush — the "Manage visualization requests" screen's
+// ONE api: top KPI cards (`summary`) + the filtered/paginated table (`rows`) in a single call.
+// RENAMED from `getByStats` 2026-09-18 — see GAPS.md. Mirrors design_request's own getByStats
 // pattern (validate + throw BEFORE executeOperation, same reasoning as variant_task's
 // performAction: queryExecutor.js discards a custom `.status` on any error it doesn't recognize).
 // 'open'/'delivered' require a per-request rollup across variant_task, which a plain filterQuery
 // can't express — computed here in JS rather than SQL, same tradeoff the original wireframe made.
 const VALID_STATS = ['open', 'delivered', 'rush'];
 
-async function getByStats(statsStatus, page = 1, pageSize = 20, logContext = {}) {
+async function getDashboard(statsStatus, page = 1, pageSize = 20, logContext = {}) {
   if (!VALID_STATS.includes(statsStatus)) {
     const err = new Error(`Invalid statsStatus '${statsStatus}'. Must be one of: ${VALID_STATS.join(', ')}`);
     err.status = 400;
@@ -703,13 +753,8 @@ async function getByStats(statsStatus, page = 1, pageSize = 20, logContext = {})
     async () => {
       const allRequests = await model.findAll();
       const allTasks = await taskModel.findAll();
-
-      const tasksByKey = {};
-      for (const t of allTasks) {
-        const d = t.variant_task_details || {};
-        const key = `${d.imageRequestId}::${d.componentSetId}`;
-        (tasksByKey[key] = tasksByKey[key] || []).push(t);
-      }
+      const tasksByKey = buildTasksByKey(allTasks);
+      const summary = computeDashboardSummary(allRequests, allTasks, tasksByKey, idField, detailsField);
 
       const matched = allRequests.filter(req => {
         const d = req[detailsField] || {};
@@ -761,10 +806,10 @@ async function getByStats(statsStatus, page = 1, pageSize = 20, logContext = {})
         };
       }));
 
-      return { rows, count };
+      return { rows, count, summary };
     },
     {
-      processName: logContext.processName || `GetByStats_${entityName}`,
+      processName: logContext.processName || `GetDashboard_${entityName}`,
       correlationId: logContext.correlationId,
       metadata: { entityName, statsStatus, page, pageSize },
     }
@@ -774,7 +819,7 @@ async function getByStats(statsStatus, page = 1, pageSize = 20, logContext = {})
 // GET /pending-cad-files — added 2026-09-17 so CAD has a way to discover which componentSetIds
 // are actually waiting on a CAD file, rather than relying on someone telling them out-of-band.
 // Scans every requestedVariants entry across every image_request (same "compute in JS, not SQL"
-// pattern as getDashboard/getByStats — Postgres JSONB filterQuery can't express "does any array
+// pattern as getDashboard — Postgres JSONB filterQuery can't express "does any array
 // element have cadFilePath: null"), filters to entries where cadFilePath is still falsy, and
 // dedupes by componentSetId (the SAME componentSetId can sit in more than one open request's
 // basket). componentSetId already uniquely determines the resolved metal/stone/size combo (that's
@@ -784,7 +829,7 @@ async function getByStats(statsStatus, page = 1, pageSize = 20, logContext = {})
 // same variant), so those are collected as arrays. priority escalates to 'Rush' if ANY matching
 // request is Rush, and neededBy takes the earliest date across matches, so CAD's own queue can
 // still prioritize sensibly. ornamentName/collectionNumber come from the same Merchandising
-// lookup+cache getByStats already uses (fetchBaseDesignDisplayInfo) — only for the componentSetIds
+// lookup+cache getDashboard already uses (fetchBaseDesignDisplayInfo) — only for the componentSetIds
 // actually returned, not every base_design in the catalog.
 async function getPendingCadFiles(logContext = {}) {
   const model = getEntityModel();
@@ -859,6 +904,5 @@ module.exports = {
   addRequestedVariant,
   getVariantsDetail,
   getDashboard,
-  getByStats,
   getPendingCadFiles,
 };

@@ -37,6 +37,10 @@
             "type": "string",
             "description": "The real, human-recognizable SKU/variant number (e.g. \"RN0045167\") — CAD's own component_set_details.componentSetId field, NOT the same as this entry's own `componentSetId` above (that's the technical/internal id, used for all API calls). Added 2026-09-17 so CAD's team (via pending-cad-files) and any UI can recognize which physical piece a request is about, instead of only ever seeing the internal id. Sourced from match-component-set's own `variantNumber` field at raise-request time — optional here (older callers may omit it) but should always be passed when available."
           },
+          "ornamentName": {
+            "type": "string",
+            "description": "The matched component_set's OWN ornamentName (e.g. \"Ring Assembled\") — the manufactured component/assembly name, distinct from the base_design's own ornamentName (e.g. \"Classic Solitaire Ring\", fetched separately from Merchandising by baseDesignId). Sourced from match-component-set's own `ornamentName` field at raise-request time — optional (older callers may omit it) but should always be passed when available, same as `variantNumber`. Needed by the request detail/drill-down screen's per-row \"Variant\" column."
+          },
           "metalTeamId": { "type": "string", "minLength": 1 },
           "metalTeamCode": { "type": "string", "minLength": 1 },
           "stoneTeamId": { "type": "string", "minLength": 1 },
@@ -44,6 +48,14 @@
           "dimensionalSelection": {
             "type": "object",
             "additionalProperties": { "type": "string" }
+          },
+          "shape": {
+            "type": "string",
+            "description": "Stone shape (e.g. \"Round\") — sourced from match-component-set's own `shape` field. Not part of `dimensionalSelection` (that's metal-team axes only, e.g. Ring Size/Band Width) but shown alongside it as an \"attribute\" on the request detail screen. Optional/undefined for a plain-band variant with no stone team."
+          },
+          "carat": {
+            "type": ["number", "null"],
+            "description": "Stone carat value the caller passed to match-component-set. Same optional/undefined-for-plain-band caveat as `shape`."
           },
           "metalColourGroups": {
             "type": "array",

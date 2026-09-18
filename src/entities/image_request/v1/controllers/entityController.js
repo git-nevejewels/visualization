@@ -141,15 +141,11 @@ async function getVariantsDetail(req, res, next) {
   } catch (error) { next(error); }
 }
 
+// Renamed from getByStats 2026-09-18 — see GAPS.md. This is now the ONE endpoint the "Manage
+// visualization requests" screen calls: top KPI cards (`summary`) + the filtered/paginated table
+// (`data`) in a single response. The old standalone GET /dashboard (KPIs only, no table) was
+// removed entirely, not left dormant alongside this one.
 async function getDashboard(req, res, next) {
-  const { correlationId } = req.correlationContext || {};
-  try {
-    const result = await entityService.getDashboard({ correlationId, processName: `GetDashboard_${entityName}` });
-    return res.status(result.status).json({ status: result.status, data: result.data });
-  } catch (error) { next(error); }
-}
-
-async function getByStats(req, res, next) {
   const { correlationId } = req.correlationContext || {};
   try {
     const statsStatus = req.query.statsStatus;
@@ -160,13 +156,14 @@ async function getByStats(req, res, next) {
     const page = parseInt(req.query.pageNumber, 10) || 1;
     const pageSize = parseInt(req.query.batchSize, 10) || 10;
 
-    const result = await entityService.getByStats(statsStatus, page, pageSize, { correlationId, processName: `GetByStats_${entityName}` });
+    const result = await entityService.getDashboard(statsStatus, page, pageSize, { correlationId, processName: `GetDashboard_${entityName}` });
 
     return res.status(result.status).json({
       status: result.status,
       data: result.data?.rows || [],
       pagination: { batchSize: pageSize, pageNo: page, totalCount: result.data?.count || 0 },
       filter: { statsStatus },
+      summary: result.data?.summary,
     });
   } catch (error) {
     if (error.status === 400) {
@@ -184,4 +181,4 @@ async function getPendingCadFiles(req, res, next) {
   } catch (error) { next(error); }
 }
 
-module.exports = { create, bulkCreate, getById, getAll, update, deleteEntity, addRequestedVariant, getVariantsDetail, getDashboard, getByStats, getPendingCadFiles };
+module.exports = { create, bulkCreate, getById, getAll, update, deleteEntity, addRequestedVariant, getVariantsDetail, getDashboard, getPendingCadFiles };
