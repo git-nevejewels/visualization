@@ -536,13 +536,13 @@ function merchandisingUrl(path) {
 const BASE_DESIGN_DISPLAY_CACHE_TTL_MS = 5 * 60_000;
 const baseDesignDisplayCache = new Map(); // baseDesignId -> { data, fetchedAt }
 
-async function fetchBaseDesignDisplayInfo(baseDesignId) {
+async function fetchBaseDesignDisplayInfo(baseDesignId, logContext = {}) {
   const cached = baseDesignDisplayCache.get(baseDesignId);
   if (cached && (Date.now() - cached.fetchedAt) < BASE_DESIGN_DISPLAY_CACHE_TTL_MS) return cached.data;
 
   let body;
   try {
-    body = await fetchJson(merchandisingUrl(`/${baseDesignId}`));
+    body = await fetchJson(merchandisingUrl(`/${baseDesignId}`), logContext);
   } catch (err) {
     if (err.status === 404) return null;
     throw err;
@@ -742,7 +742,7 @@ async function getByStats(statsStatus, page = 1, pageSize = 20, logContext = {})
           tasksByComponentSetId[rv.componentSetId] = tasksByKey[`${req[idField]}::${rv.componentSetId}`] || [];
         }
         const rollup = summarizeRequestRollup(requestedVariants, tasksByComponentSetId);
-        const displayInfo = d.baseDesignId ? await fetchBaseDesignDisplayInfo(d.baseDesignId) : null;
+        const displayInfo = d.baseDesignId ? await fetchBaseDesignDisplayInfo(d.baseDesignId, logContext) : null;
 
         return {
           imageRequestId: req[idField],
@@ -831,7 +831,7 @@ async function getPendingCadFiles(logContext = {}) {
 
       const rows = Object.values(byComponentSetId);
       return Promise.all(rows.map(async (row) => {
-        const displayInfo = row.baseDesignId ? await fetchBaseDesignDisplayInfo(row.baseDesignId) : null;
+        const displayInfo = row.baseDesignId ? await fetchBaseDesignDisplayInfo(row.baseDesignId, logContext) : null;
         return {
           ...row,
           ornamentName: displayInfo?.ornamentName,

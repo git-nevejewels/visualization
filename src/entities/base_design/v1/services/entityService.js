@@ -62,13 +62,13 @@ function mdmUrl(path) {
 const STONE_TEMPLATE_CACHE_TTL_MS = 5 * 60_000;
 const stoneTemplateCache = new Map(); // templateId -> { data, fetchedAt }
 
-async function fetchStoneTemplate(templateId) {
+async function fetchStoneTemplate(templateId, logContext = {}) {
   const cached = stoneTemplateCache.get(templateId);
   if (cached && (Date.now() - cached.fetchedAt) < STONE_TEMPLATE_CACHE_TTL_MS) return cached.data;
 
   let body;
   try {
-    body = await fetchJson(mdmUrl(`/${templateId}`));
+    body = await fetchJson(mdmUrl(`/${templateId}`), logContext);
   } catch (err) {
     if (err.status === 404) return null;
     throw err;
@@ -118,6 +118,12 @@ const CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 let baseDesignCache = { data: null, fetchedAt: 0 };
 let refreshInFlight = null;
 
+// Deliberately does NOT forward a correlationId to fetchJson — unlike every other outbound call in
+// this file, this refresh is a SHARED background operation with no single owning request: the
+// stale-while-revalidate refresh it triggers may be kicked off by one request but its result gets
+// served to many others already in flight, and the very first cold-start call similarly has no
+// natural "this one request" to attribute the trace to. Attaching one caller's correlationId here
+// would misrepresent the trace, not complete it.
 async function refreshBaseDesignCache() {
   const merchResponse = await fetchJson(merchandisingUrl('?pageNumber=1&batchSize=5000'));
   const allDesigns = (merchResponse.data || []).map(mapRow);
@@ -285,12 +291,12 @@ function deriveDimensionalFeatures(metalFeatures = [], producedMetalTeams = []) 
 // Certificate is deliberately dropped from every template's features — explicit user decision
 // (2026-09-15): no image is ever produced differently based on Certificate, so it has no reason to
 // appear in an image-request options response.
-async function fetchStoneFeaturesByTemplateId(templateIds = []) {
+async function fetchStoneFeaturesByTemplateId(templateIds = [], logContext = {}) {
   const ids = [...new Set(templateIds.filter(Boolean))];
   if (ids.length === 0) return [];
 
   const templates = await Promise.all(
-    ids.map(async templateId => ({ templateId, template: await fetchStoneTemplate(templateId) }))
+    ids.map(async templateId => ({ templateId, template: await fetchStoneTemplate(templateId, logContext) }))
   );
 
   return templates
@@ -413,7 +419,7 @@ async function getById(id, logContext = {}) {
     async () => {
       let body;
       try {
-        body = await fetchJson(merchandisingUrl(`/${id}`));
+        body = await fetchJson(merchandisingUrl(`/${id}`), logContext);
       } catch (err) {
         if (err.status === 404) return null;
         throw err;
@@ -618,7 +624,7 @@ async function getOptions(id, scope = {}, logContext = {}) {
       const producedMetalTeamIds = new Set(producedRows.map(r => r.metalTeamId).filter(Boolean));
       const producedStoneTeamIds = new Set(producedRows.map(r => r.stoneTeamId).filter(Boolean));
 
-      const body = await fetchJson(merchandisingUrl(`/${id}`));
+      const body = await fetchJson(merchandisingUrl(`/${id}`), logContext);
       const details = body.data?.base_design_details || {};
       const producedStoneTeams = (details.stoneConfig?.stoneTeams || []).filter(t => producedStoneTeamIds.has(t.teamId));
       // Stone Type/Shape are exempted from production-filtering (user decision 2026-09-16, same
@@ -673,7 +679,7 @@ async function getOptions(id, scope = {}, logContext = {}) {
         sizeOptions = matchedGroup?.sizeOptions || [];
 
         const templateIds = (resolvedStoneTeam.teamDetails || []).map(d => d.templateId);
-        stoneFeatureGroups = await fetchStoneFeaturesByTemplateId(templateIds);
+        stoneFeatureGroups = await fetchStoneFeaturesByTemplateId(templateIds, logContext);
       }
 
       const options = buildOptionsList({
@@ -844,7 +850,7 @@ async function matchComponentSet(id, { metalTeamCode, stoneTeamCode, caratValue 
 
       // Single-row Merchandising fetch to re-resolve the matched row's own axis VALUES (Ring Size,
       // Band Width, Shape) for the molded response — see moldMatchedComponentSet.
-      const body = await fetchJson(merchandisingUrl(`/${id}`));
+      const body = await fetchJson(merchandisingUrl(`/${id}`), logContext);
       return moldMatchedComponentSet(matched, { baseDesignDetails: body.data?.base_design_details, caratValue });
     },
     {
