@@ -31,27 +31,21 @@ async function getById(req, res, next) {
 async function getOptions(req, res, next) {
   const { correlationId } = req.correlationContext || {};
   try {
-    const { stoneType, shape, metalSelections: metalSelectionsRaw } = req.query;
-    // Resolving SF/CT groups for one Stone Type + Shape pick only makes sense when BOTH are given
-    // together — validated before executeOperation, per this repo's own established pattern (see
-    // RULES.md: validate before, never inside, the callback).
-    if ((stoneType !== undefined && shape === undefined) || (stoneType === undefined && shape !== undefined)) {
-      return res.status(400).json({ status: 400, error: 'stoneType and shape must be provided together', correlationId });
-    }
+    const { stoneTeamId, metalSelections: metalSelectionsRaw } = req.query;
 
     let metalSelections;
     if (metalSelectionsRaw !== undefined) {
       try {
         metalSelections = JSON.parse(metalSelectionsRaw);
       } catch {
-        return res.status(400).json({ status: 400, error: 'metalSelections must be valid JSON, e.g. {"Band Width":"Classic","Ring Size":"I"}', correlationId });
+        return res.status(400).json({ status: 400, error: 'metalSelections must be valid JSON, e.g. {"Band Width":"01","Ring Size":"06"}', correlationId });
       }
     }
 
-    const result = await entityService.getOptions(req.params.id, { stoneType, shape, metalSelections }, { correlationId, processName: 'GetOptions_base_design' });
+    const result = await entityService.getOptions(req.params.id, { stoneTeamId, metalSelections }, { correlationId, processName: 'GetOptions_base_design' });
     if (!result.data) {
-      const message = stoneType
-        ? `base_design not found, has no component_set variants yet, or no stone team matches stoneType=${stoneType}/shape=${shape}`
+      const message = stoneTeamId
+        ? `base_design not found, has no component_set variants yet, or no stone team matches stoneTeamId=${stoneTeamId}`
         : 'base_design not found, or has no component_set variants yet';
       return res.status(result.status || 404).json({ status: result.status || 404, error: message, correlationId });
     }

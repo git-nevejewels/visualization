@@ -47,16 +47,22 @@ router.use((req, res, next) => {
  *       into a team code, so component_set has no opinion on them).
  *
  *       SF/CT show a DEFAULT stone-team preview (the first PRODUCED team, deterministic) even
- *       BEFORE `stoneType`+`shape` are given — flagged `isDefaultStoneSelection: true` — rather than
+ *       BEFORE `stoneTeamId` is given — flagged `isDefaultStoneSelection: true` — rather than
  *       nothing at all, since a base_design can reference a dozen+ distinct stone_templates and
- *       dumping all of them isn't the answer either. Pass `stoneType`+`shape` together (one pick)
+ *       dumping all of them isn't the answer either. Pass `stoneTeamId` (read directly off the
+ *       `stone_type` group's own nested `shapes[].stoneTeamId` in THIS SAME unscoped response — no
+ *       separate resolution call needed, since (stoneType, shape) is already 1:1 with a stoneTeamId)
  *       to resolve the EXACT produced stone team instead, getting back its real
- *       `stoneTeamId`/`stoneTeamCode` with no `isDefaultStoneSelection` flag.
+ *       `stoneTeamId`/`stoneTeamCode` with no `isDefaultStoneSelection` flag. Changed 2026-09-21
+ *       from separate `stoneType`+`shape` TEXT params — mirrors D:\work\cad's own pdp v2 entity,
+ *       which never resolves a stone team from text either (its SKU URL already carries the code).
  *
  *       Once a value is picked for every MT feature, pass them as `metalSelections` (a JSON object,
- *       {featureName: valueText}) to resolve the matching PRODUCED metal team the same way, getting
- *       back its real `metalTeamId`/`metalTeamCode`. Neither team code is ever reconstructed by
- *       concatenating value codes — both are read directly off the one exact team that matches.
+ *       {featureName: valueCode} — valueCode, not valueText, since 2026-09-21, same reasoning as
+ *       stoneTeamId above: the caller already has each pill's own code from this response) to
+ *       resolve the matching PRODUCED metal team the same way, getting back its real
+ *       `metalTeamId`/`metalTeamCode`. Neither team code is ever reconstructed by concatenating
+ *       value codes — both are read directly off the one exact team that matches.
  *       Pass BOTH resolved codes to GET /{id}/match-component-set to get the final componentSetId.
  *     tags: [BaseDesign]
  *     parameters:
@@ -65,28 +71,24 @@ router.use((req, res, next) => {
  *         schema: { type: string }
  *         required: true
  *       - in: query
- *         name: stoneType
+ *         name: stoneTeamId
  *         schema: { type: string }
- *         description: Must be provided together with shape, as one value from the ST/"Stone Type" group.
- *       - in: query
- *         name: shape
- *         schema: { type: string }
- *         description: Must be provided together with stoneType, as one value from the ST/"Shape" group.
+ *         description: One stone team's teamId (e.g. "ST0000") — read off this same endpoint's own unscoped `stone_type` group's `shapes[].stoneTeamId`, never resolved from stoneType/shape text.
  *       - in: query
  *         name: metalSelections
  *         schema: { type: string }
- *         description: 'JSON object of {featureName: valueText} for every MT feature, e.g. {"Band Width":"Classic","Ring Size":"I"}.'
+ *         description: 'JSON object of {featureName: valueCode} for every MT feature, e.g. {"Band Width":"01","Ring Size":"06"}.'
  *     responses:
  *       200:
  *         description: >
  *           { baseDesignId, variantCount,
  *             options: [{ featureId, name, partOf: "MT"|"ST"|"SF"|"CT",
- *                          values: [{ valueCode?, valueText }] }],
+ *                          values: [{ valueCode?, valueText, shapes?: [{valueText, stoneTeamId, stoneTeamCode}] }] }],
  *             stoneTeamId?, stoneTeamCode?, isDefaultStoneSelection?, metalTeamId?, metalTeamCode? }
  *       400:
- *         description: Only one of stoneType/shape was provided (they must be given together), or metalSelections isn't valid JSON
+ *         description: metalSelections isn't valid JSON
  *       404:
- *         description: base_design not found, has no component_set variants yet, or (when scoped) no PRODUCED stone team matches the given Stone Type/Shape
+ *         description: base_design not found, has no component_set variants yet, or (when scoped) no PRODUCED stone team matches the given stoneTeamId
  */
 router.get('/:id/options', entityController.getOptions);
 

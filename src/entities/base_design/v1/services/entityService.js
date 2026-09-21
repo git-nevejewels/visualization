@@ -486,18 +486,34 @@ async function getById(id, logContext = {}) {
 // without needing a separate available:true/false flag on every value. The final "has this actually
 // been produced" check still happens later, at match-component-set time — this is purely about
 // which combinations are even THEORETICALLY valid to pick.
+//
+// Each shape entry also carries its own resolved stoneTeamId/stoneTeamCode (added 2026-09-21) —
+// mirrors D:\work\cad's own pdp v2 entity, which never resolves a stone team from stoneType+shape
+// TEXT at all: its SKU URL already carries the team code directly (`ST0300`), parsed by
+// `skuParser.js` and looked up with a plain `.find(t => t.teamCode === code)` (see
+// resolveSkuSelection.js's `resolveStoneTeamByCode`). Since the (stoneType, shape) -> team mapping
+// is already 1:1 and known here, exposing the code lets the caller do that same direct lookup
+// itself (via `?stoneTeamId=...` below) instead of asking this endpoint to re-resolve it from text
+// on a second round trip.
 function deriveStoneAxisValues(stoneTeams = []) {
-  const shapesByStoneType = new Map(); // stoneType -> Set(shape)
+  const shapesByStoneType = new Map(); // stoneType -> Map(shape -> team)
   for (const team of stoneTeams) {
-    for (const d of team.teamDetails || []) {
-      if (!d.stoneType || !d.shape) continue;
-      if (!shapesByStoneType.has(d.stoneType)) shapesByStoneType.set(d.stoneType, new Set());
-      shapesByStoneType.get(d.stoneType).add(d.shape);
-    }
+    // The CAPTAIN detail is the one that actually identifies this team's (stoneType, shape) —
+    // side-stone details on the same team can carry their own, different stoneType/shape values
+    // (e.g. Natural Diamond side stones on a Natural Moissanite team) and would misattribute the
+    // team if not excluded.
+    const captainDetail = (team.teamDetails || []).find(d => d.isCaptain);
+    if (!captainDetail?.stoneType || !captainDetail?.shape) continue;
+    if (!shapesByStoneType.has(captainDetail.stoneType)) shapesByStoneType.set(captainDetail.stoneType, new Map());
+    shapesByStoneType.get(captainDetail.stoneType).set(captainDetail.shape, team);
   }
-  return [...shapesByStoneType.entries()].map(([stoneType, shapes]) => ({
+  return [...shapesByStoneType.entries()].map(([stoneType, shapeMap]) => ({
     valueText: stoneType,
-    shapes: [...shapes],
+    shapes: [...shapeMap.entries()].map(([shape, team]) => ({
+      valueText: shape,
+      stoneTeamId: team.teamId,
+      stoneTeamCode: team.teamCode,
+    })),
   }));
 }
 
@@ -539,44 +555,46 @@ function buildOptionsList({ metalFeatures, producedMetalTeams, allStoneTeams, st
 //   2. Fallback: for each produced team matching every OTHER feature (ignoring Ring Size), read
 //      that team's own produced component_set row's `supportedMetalTeamCodes`. The Ring Size code
 //      segment length is taken from the CANDIDATE'S OWN known-correct Ring Size valueCode (never a
-//      guessed/hardcoded split) — strip that many characters off each supported code's end, map
-//      the result through the Ring Size feature's own valueCode->valueText catalog, and check
-//      whether the user's selected Ring Size is among them. This never assumes a concatenation
-//      order or recipe — it only reads real, already-stored codes.
-async function resolveMetalTeamForRingSize(id, producedMetalTeams, metalFeatures, metalSelections) {
+//      guessed/hardcoded split) — strip that many characters off each supported code's end and
+//      compare directly against the user's selected Ring Size CODE. This never assumes a
+//      concatenation order or recipe — it only reads real, already-stored codes.
+//
+// Matches on valueCode, not valueText (changed 2026-09-21 — optimization: the frontend already has
+// each pill's valueCode from the /options response it rendered the pill from, so it can send that
+// straight back instead of the display label — same reliability, since valueCode already verified
+// consistent per (featureName, valueCode) across every real base_design checked, just a shorter/
+// cheaper string to carry and compare).
+function resolveMetalTeamForRingSize(producedMetalTeams, metalFeatures, metalSelections) {
   const ringSizeFeature = metalFeatures.find(f => f.legacyFeature === RING_SIZE_LEGACY_FEATURE);
   const ringSizeFeatureName = ringSizeFeature?.featureName;
-  const selectedRingSizeText = ringSizeFeatureName ? metalSelections[ringSizeFeatureName] : undefined;
+  const selectedRingSizeCode = ringSizeFeatureName ? metalSelections[ringSizeFeatureName] : undefined;
 
   const otherSelections = { ...metalSelections };
   if (ringSizeFeatureName) delete otherSelections[ringSizeFeatureName];
 
   const candidates = producedMetalTeams.filter(t => {
-    const teamValues = new Map((t.teamDetails || []).map(d => [d.featureName, d.valueText]));
-    return Object.entries(otherSelections).every(([featureName, valueText]) => teamValues.get(featureName) === valueText);
+    const teamValues = new Map((t.teamDetails || []).map(d => [d.featureName, d.valueCode]));
+    return Object.entries(otherSelections).every(([featureName, valueCode]) => teamValues.get(featureName) === valueCode);
   });
 
-  if (!selectedRingSizeText) return candidates[0] || null;
+  if (!selectedRingSizeCode) return candidates[0] || null;
 
-  const exact = candidates.find(t => (t.teamDetails || []).some(d => d.featureName === ringSizeFeatureName && d.valueText === selectedRingSizeText));
+  const exact = candidates.find(t => (t.teamDetails || []).some(d => d.featureName === ringSizeFeatureName && d.valueCode === selectedRingSizeCode));
   if (exact) return exact;
-
-  const ringSizeTextByCode = new Map((ringSizeFeature?.values || []).map(v => [v.valueCode, v.valueText]));
 
   for (const candidate of candidates) {
     const ownRingSizeDetail = (candidate.teamDetails || []).find(d => d.featureName === ringSizeFeatureName);
     if (!ownRingSizeDetail?.valueCode) continue;
 
-    const [row] = await defaultSequelize.query(
-      `SELECT component_set_details->'supportedMetalTeamCodes' AS "supportedMetalTeamCodes"
-       FROM component_set
-       WHERE component_set_details->>'baseDesignId' = :id AND component_set_details->>'metalTeamCode' = :metalTeamCode
-       LIMIT 1`,
-      { replacements: { id, metalTeamCode: candidate.teamCode }, type: defaultSequelize.QueryTypes.SELECT }
-    );
-    const supportedCodes = row?.supportedMetalTeamCodes || [];
+    // supportedMetalTeamCodes is already ON the team object itself (base_design's own metalTeams
+    // response) — no DB round trip needed to read it. Mirrors D:\work\cad's pdp v2 entity's own
+    // resolveBaseMetalTeam() (resolveSkuSelection.js), which resolves the exact same kind of
+    // "covering team" fallback purely in-memory off `t.supportedMetalTeamCodes`, never a query.
+    // Previously this queried `component_set` directly for the same data — confirmed redundant
+    // 2026-09-21, since it's already denormalized onto the team object we already have in hand.
+    const supportedCodes = candidate.supportedMetalTeamCodes || [];
     const suffixLength = ownRingSizeDetail.valueCode.length;
-    const covers = supportedCodes.some(code => ringSizeTextByCode.get(String(code).replace(/^MT/, '').slice(-suffixLength)) === selectedRingSizeText);
+    const covers = supportedCodes.some(code => String(code).replace(/^MT/, '').slice(-suffixLength) === selectedRingSizeCode);
     if (covers) return candidate;
   }
 
@@ -597,14 +615,19 @@ async function resolveMetalTeamForRingSize(id, producedMetalTeams, metalFeatures
 // filtered this way — they're not encoded into metalTeamCode in the first place, so component_set
 // has no opinion on them; base_design's own catalog is authoritative (see deriveDimensionalFeatures).
 //
-// Pass `scope.stoneType` + `scope.shape` TOGETHER (one Stone Type + Shape pick) to additionally
-// resolve that one PRODUCED stone team's own SF (stone_template quality features, Certificate
-// excluded) and CT (carat/size) groups — same "don't dump a dozen+ templates up front" principle
-// as before, just triggered by feature VALUES now instead of team ids. The frontend builds its own
-// metalTeamCode/stoneTeamCode from the values here and passes those to
-// `/:id/match-component-set` — this endpoint never resolves or returns a team id itself.
+// Pass `scope.stoneTeamId` (one Stone Type + Shape pick, already resolved by the caller straight
+// off this same endpoint's own unscoped `stone_type` group — see deriveStoneAxisValues) to
+// additionally resolve that one PRODUCED stone team's own SF (stone_template quality features,
+// Certificate excluded) and CT (carat/size) groups — same "don't dump a dozen+ templates up front"
+// principle as before. Changed 2026-09-21 from `stoneType`+`shape` TEXT params to a single
+// `stoneTeamId` — mirrors D:\work\cad's own pdp v2 entity, which never resolves a stone team from
+// text either (its SKU URL already carries the code, looked up with a plain `.find()`; see
+// deriveStoneAxisValues's own comment). The frontend builds its own metalTeamCode/stoneTeamCode
+// from the values here and passes those to `/:id/match-component-set` — this endpoint never
+// resolves or returns a team id itself... except stoneTeamId, which is now an INPUT here, not an
+// output resolved from something else.
 async function getOptions(id, scope = {}, logContext = {}) {
-  const { stoneType, shape, metalSelections } = scope;
+  const { stoneTeamId, metalSelections } = scope;
   return executeOperation(
     async () => {
       const [{ count }] = await defaultSequelize.query(
@@ -638,9 +661,9 @@ async function getOptions(id, scope = {}, logContext = {}) {
       let resolvedStoneTeam = null;
       let isDefaultStoneSelection = false;
 
-      if (stoneType !== undefined && shape !== undefined) {
-        resolvedStoneTeam = allStoneTeams.find(t => (t.teamDetails || []).some(d => d.stoneType === stoneType && d.shape === shape));
-        if (!resolvedStoneTeam) return null; // -> controller reports 404 (no such Stone Type/Shape combination exists at all)
+      if (stoneTeamId !== undefined) {
+        resolvedStoneTeam = allStoneTeams.find(t => t.teamId === stoneTeamId);
+        if (!resolvedStoneTeam) return null; // -> controller reports 404 (no such stoneTeamId on this base design)
       } else if (allStoneTeams.length > 0) {
         // No Stone Type/Shape picked yet — show SF/CT for a DEFAULT stone team anyway (rather than
         // nothing at all), matching the wireframe's own "show everything upfront" pattern. Prefer a
@@ -702,12 +725,16 @@ async function getOptions(id, scope = {}, logContext = {}) {
       // Optional: once the caller has picked a value for every MT feature, resolve which real,
       // PRODUCED metal team that combination matches — same "find the one exact team" approach as
       // the stone side above, never a concatenated code. `metalSelections` is a plain
-      // {featureName: valueText} map (e.g. {"Band Width":"Classic","Ring Size":"I"}). Ring Size
-      // gets special handling (see resolveMetalTeamForRingSize) since it's exempt from production
-      // filtering — a selected Ring Size the design shows but never produced on its OWN is still
-      // resolved correctly via the covering team's `supportedMetalTeamCodes`.
+      // {featureName: valueCode} map (e.g. {"Band Width":"01","Ring Size":"06"}) — valueCode, not
+      // valueText, since 2026-09-21: the caller already has each pill's own valueCode from the
+      // /options response it rendered the pill from, so it can send that straight back (shorter,
+      // and just as reliable — verified consistent per (featureName, valueCode) across every real
+      // base_design checked) instead of the display label. Ring Size gets special handling (see
+      // resolveMetalTeamForRingSize) since it's exempt from production filtering — a selected Ring
+      // Size the design shows but never produced on its OWN is still resolved correctly via the
+      // covering team's `supportedMetalTeamCodes`.
       if (metalSelections && Object.keys(metalSelections).length > 0) {
-        const resolvedMetalTeam = await resolveMetalTeamForRingSize(id, producedMetalTeams, details.metalConfig?.metalFeatures || [], metalSelections);
+        const resolvedMetalTeam = resolveMetalTeamForRingSize(producedMetalTeams, details.metalConfig?.metalFeatures || [], metalSelections);
         if (resolvedMetalTeam) {
           response.metalTeamId = resolvedMetalTeam.teamId;
           response.metalTeamCode = resolvedMetalTeam.teamCode;
@@ -719,7 +746,7 @@ async function getOptions(id, scope = {}, logContext = {}) {
     {
       processName: logContext.processName || 'GetOptions_base_design',
       correlationId: logContext.correlationId,
-      metadata: { id, stoneType, shape },
+      metadata: { id, stoneTeamId },
     }
   );
 }

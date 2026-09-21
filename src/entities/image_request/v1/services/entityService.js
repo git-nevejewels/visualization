@@ -480,7 +480,12 @@ function summarizeVariant(requestedVariant, tasksForVariant) {
   const byStage = {};
   for (const t of tasksForVariant) {
     const d = t.variant_task_details || {};
-    byStage[d.stage] = { variant_task_id: t.variant_task_id, status: d.status, assignee: d.assignee || null };
+    byStage[d.stage] = {
+      variant_task_id: t.variant_task_id,
+      status: d.status,
+      assignee: d.assignee || null,
+      uploadedImages: d.uploadedImages || [],
+    };
   }
 
   const imageSets = (requestedVariant.metalColourGroups?.length || 0) * (requestedVariant.stoneColours?.length || 0);

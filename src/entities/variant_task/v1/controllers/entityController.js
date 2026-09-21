@@ -169,4 +169,34 @@ async function handleCadFileUploaded(req, res, next) {
   }
 }
 
-module.exports = { create, bulkCreate, getById, getAll, update, deleteEntity, performAction, bulkPerformAction, handleCadFileUploaded };
+// --------------------
+// POST /:id/images — see RULES.md/GAPS.md's 2026-09-19 image-upload entry. Body carries already-
+// uploaded URLs (bff-for-app's imageUpload.service.js pre-hook converts raw bytes to S3/GCS URLs
+// before this is ever called) — this endpoint never receives raw file bytes.
+// --------------------
+async function addUploadedImages(req, res, next) {
+  const { correlationId, traceId, spanId } = req.correlationContext || {};
+  const userId = req.headers['x-user-id'] || req.user?.email;
+  try {
+    const entityId = req.params.id;
+    const { imageUrls } = req.body || {};
+    const result = await entityService.addUploadedImages(entityId, imageUrls,
+      { correlationId, processName: `AddUploadedImages_${entityName}` });
+
+    if (!result.data) {
+      return res.status(result.status || 404).json({ status: result.status || 404, error: 'Entity not found', correlationId });
+    }
+
+    await publishDomainEvent(entityName, 'updated', version, result.data.toJSON ? result.data.toJSON() : result.data,
+      { correlationId, traceId, spanId, userId });
+
+    return res.status(result.status).json({ status: result.status, data: result.data });
+  } catch (error) {
+    if (error.status === 400) {
+      return res.status(400).json({ status: 400, error: error.message, correlationId });
+    }
+    next(error);
+  }
+}
+
+module.exports = { create, bulkCreate, getById, getAll, update, deleteEntity, performAction, bulkPerformAction, handleCadFileUploaded, addUploadedImages };

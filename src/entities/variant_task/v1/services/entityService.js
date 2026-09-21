@@ -322,10 +322,13 @@ async function deleteEntity(id, logContext = {}) {
 
 // --------------------
 // Task workflow actions — see ARCHITECTURE.md's "Task workflow" API surface and
-// RULES.md. Mirrors visualization_studio_v15.html's assign()/start()/advance()/
-// hold()/complete(), tightened into real preconditions since an API has no UI
-// to gate which button is even shown (the wireframe's own functions don't
-// self-validate — only the UI decides which one to expose via primary()).
+// RULES.md. Mirrors visualization_studio_v15.html's assign()/start()/hold()/complete(),
+// tightened into real preconditions since an API has no UI to gate which button is even
+// shown (the wireframe's own functions don't self-validate — only the UI decides which
+// one to expose via primary()). The wireframe's own advance() (walking Tool
+// config/Keyshot/Photoshop before completing rn) was REMOVED 2026-09-21 — manager decision
+// to skip those internal render sub-steps entirely; rn now completes the same way zb/obj
+// do, straight from 'In progress'. `uploadedImages` gating on rn's `complete` is unchanged.
 //
 // Deliberately NOT routed through executeOperation() for the validation step:
 // queryExecutor.js's catch-all collapses every thrown error to a generic 500
@@ -337,8 +340,7 @@ async function deleteEntity(id, logContext = {}) {
 // `if (error.status === 400)` handling, copied from that same precedent).
 // --------------------
 const STAGE_ORDER = ['zb', 'obj', 'rn'];
-const RENDER_CHAIN = ['Tool config', 'Keyshot', 'Photoshop'];
-const VALID_ACTIONS = ['assign', 'start', 'advance', 'hold', 'complete'];
+const VALID_ACTIONS = ['assign', 'start', 'hold', 'complete'];
 
 function badRequest(message) {
   const err = new Error(message);
@@ -347,8 +349,11 @@ function badRequest(message) {
 }
 
 // Returns { status, setAssignee?, setAssigneeIfMissing?, isComplete? } or throws
-// a 400 if `action` isn't legal from `currentStatus`/`stage` right now.
-function computeTransition(action, stage, currentStatus) {
+// a 400 if `action` isn't legal from `currentStatus`/`stage` right now. `details`
+// is the task's own JSONB blob — needed only to check `uploadedImages` on a render
+// (rn) 'complete' (CLAUDE.md's stated rule: rn needs >=1 uploaded image before
+// Completed — see RULES.md/GAPS.md for the 2026-09-19 fix that actually enforces it).
+function computeTransition(action, stage, currentStatus, details = {}) {
   if (!VALID_ACTIONS.includes(action)) {
     throw badRequest(`Unknown action '${action}'. Must be one of: ${VALID_ACTIONS.join(', ')}`);
   }
@@ -367,23 +372,7 @@ function computeTransition(action, stage, currentStatus) {
     if (currentStatus !== 'Assigned' && currentStatus !== 'On hold') {
       throw badRequest(`Cannot start — status is '${currentStatus}', must be 'Assigned' or 'On hold'`);
     }
-    return { status: stage === 'rn' ? 'Tool config' : 'In progress', setAssigneeIfMissing: true };
-  }
-
-  if (action === 'advance') {
-    if (stage !== 'rn') {
-      throw badRequest(`'advance' is only valid for the render stage (rn), not '${stage}'`);
-    }
-    const idx = RENDER_CHAIN.indexOf(currentStatus);
-    if (idx === -1) {
-      throw badRequest(`Cannot advance — status is '${currentStatus}', must be one of: ${RENDER_CHAIN.join(', ')}`);
-    }
-    if (idx < RENDER_CHAIN.length - 1) {
-      return { status: RENDER_CHAIN[idx + 1] };
-    }
-    // Already at the last chain step (Photoshop) — advancing from here completes
-    // the task, matching the wireframe's own advance()'s fallthrough to complete().
-    return { status: 'Completed', isComplete: true };
+    return { status: 'In progress', setAssigneeIfMissing: true };
   }
 
   if (action === 'hold') {
@@ -393,10 +382,15 @@ function computeTransition(action, stage, currentStatus) {
     return { status: 'On hold' };
   }
 
-  // action === 'complete'
-  const requiredStatus = stage === 'rn' ? 'Photoshop' : 'In progress';
-  if (currentStatus !== requiredStatus) {
-    throw badRequest(`Cannot complete — status is '${currentStatus}', must be '${requiredStatus}'`);
+  // action === 'complete' — rn's own Tool config/Keyshot/Photoshop sub-chain was removed 2026-09-21
+  // (manager decision: skip those internal render steps entirely) — rn now completes the same way
+  // zb/obj do, straight from 'In progress'. The separate uploadedImages guard below is UNCHANGED —
+  // removing the sub-chain doesn't relax that rule.
+  if (currentStatus !== 'In progress') {
+    throw badRequest(`Cannot complete — status is '${currentStatus}', must be 'In progress'`);
+  }
+  if (stage === 'rn' && !(details.uploadedImages?.length > 0)) {
+    throw badRequest('Cannot complete the render (rn) stage — at least one image must be uploaded first (see POST /:id/images)');
   }
   return { status: 'Completed', isComplete: true };
 }
@@ -467,7 +461,7 @@ async function performAction(id, action, payload = {}, logContext = {}) {
   if (!entity) return { status: 404, data: null };
 
   const details = entity[detailsField] || {};
-  const transition = computeTransition(action, details.stage, entity.status);
+  const transition = computeTransition(action, details.stage, entity.status, details);
 
   if ((transition.setAssignee || (transition.setAssigneeIfMissing && !details.assignee)) && !payload.actionBy) {
     throw badRequest(`'actionBy' is required to ${action === 'assign' ? 'assign' : 'start'} this task`);
@@ -663,6 +657,72 @@ async function handleCadFileUploaded(componentSetId, cadFilePath, logContext = {
   );
 }
 
+// --------------------
+// POST /:id/images — appends one or more already-uploaded image URLs to this task's
+// `uploadedImages`. Render (rn) stage only — image sets are the render stage's deliverable, zb/obj
+// tasks have nothing to attach an image to. Deliberately NOT routed through the generic update()
+// for the same reason image_request's addRequestedVariant isn't: lodash _.merge merges arrays
+// index-by-index rather than appending, which would corrupt this list on a second upload.
+// Same validate-before-executeOperation() pattern as performAction, for the same reason
+// (queryExecutor.js discards a custom `.status` on any error it doesn't recognize).
+//
+// Visualization never touches raw file bytes here — by the time this is called, bff-for-app's
+// imageUpload.service.js pre-hook has already turned whatever the client sent (base64/multipart)
+// into real S3/GCS URLs (see RULES.md/GAPS.md); this function only ever stores plain URL strings.
+// --------------------
+async function addUploadedImages(id, imageUrls, logContext = {}) {
+  const model = getEntityModel();
+  const historyModel = getEntityHistoryModel();
+  const idField = getEntityIdField();
+  const detailsField = getDetailsField();
+
+  if (!Array.isArray(imageUrls) || imageUrls.length === 0 || imageUrls.some(u => typeof u !== 'string' || !u)) {
+    throw badRequest('imageUrls must be a non-empty array of URL strings');
+  }
+
+  const entity = await model.findOne({ where: { [idField]: id } });
+  if (!entity) return { status: 404, data: null };
+
+  const details = entity[detailsField] || {};
+  if (details.stage !== 'rn') {
+    throw badRequest(`Images can only be uploaded for the render (rn) stage, not '${details.stage}'`);
+  }
+
+  const existing = Array.isArray(details.uploadedImages) ? details.uploadedImages : [];
+  const newDetails = { ...details, uploadedImages: [...existing, ...imageUrls] };
+
+  return executeOperation(
+    async () => {
+      const updatedFields = getUpdatedFields(details, newDetails);
+
+      await historyModel.create({
+        [idField]: id,
+        [detailsField]: details,
+        updated_fields: updatedFields,
+        status: entity.status,
+        api_version: entity.api_version,
+      });
+
+      await entity.update({ [detailsField]: newDetails, api_version: version });
+
+      logger.debug({
+        message: `AddUploadedImages_${entityName}: added ${imageUrls.length} image(s) (now ${newDetails.uploadedImages.length} total)`,
+        messageType: 'EVENT',
+        processName: logContext.processName || `AddUploadedImages_${entityName}`,
+        correlationId: logContext.correlationId,
+        metadata: { entityName, entityId: id, addedCount: imageUrls.length },
+      });
+
+      return entity;
+    },
+    {
+      processName: logContext.processName || `AddUploadedImages_${entityName}`,
+      correlationId: logContext.correlationId,
+      metadata: { entityName, entityId: id },
+    }
+  );
+}
+
 module.exports = {
   getAll,
   getById,
@@ -675,4 +735,5 @@ module.exports = {
   performAction,
   bulkPerformAction,
   handleCadFileUploaded,
+  addUploadedImages,
 };

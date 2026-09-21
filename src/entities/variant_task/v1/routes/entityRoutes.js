@@ -178,7 +178,11 @@ router.delete('/:id', entityController.deleteEntity);
  *   post:
  *     summary: Apply a workflow action to a single Variant Task
  *     description: |
- *       Mirrors visualization_studio_v15.html's assign()/start()/advance()/hold()/complete().
+ *       Mirrors visualization_studio_v15.html's assign()/start()/hold()/complete(). rn's own
+ *       Tool config/Keyshot/Photoshop sub-chain (and the advance() action that walked it) was
+ *       REMOVED 2026-09-21 (manager decision) — rn now goes Ready → Assigned → In progress →
+ *       Completed, same as zb/obj. `complete` on rn still requires >=1 uploaded image first
+ *       (see POST /:id/images) — that guard is unchanged by this removal.
  *       Each action is only legal from a specific current status — see RULES.md. Completing
  *       zb or obj auto-creates the next stage's task for the same variant.
  *     tags: [VariantTask]
@@ -198,7 +202,7 @@ router.delete('/:id', entityController.deleteEntity);
  *             properties:
  *               action:
  *                 type: string
- *                 enum: [assign, start, advance, hold, complete]
+ *                 enum: [assign, start, hold, complete]
  *               actionBy:
  *                 type: string
  *                 description: Required for assign, and for start when the task has no assignee yet.
@@ -211,6 +215,47 @@ router.delete('/:id', entityController.deleteEntity);
  *         description: Variant Task not found
  */
 router.post('/:id/action', entityController.performAction);
+
+/**
+ * @swagger
+ * /api/variant_task/v1/{id}/images:
+ *   post:
+ *     summary: Attach one or more delivered image URLs to a render (rn) stage task
+ *     description: |
+ *       Render (rn) stage only — 400 if called on a zb/obj task. Appends to `uploadedImages`
+ *       (never replaces it — same "append, don't merge-by-index" reasoning as image_request's
+ *       `POST /:id/variants`). At least one uploaded image is now required before `complete` can
+ *       succeed for the rn stage (see the `/:id/action` docs above) — added 2026-09-19 to actually
+ *       enforce CLAUDE.md's stated rule, which was previously unenforced.
+ *
+ *       `imageUrls` must already be real URLs by the time they reach this endpoint — Visualization
+ *       never handles raw file bytes. Through the BFF, `bff-for-app`'s own imageUpload.service.js
+ *       pre-hook (the same S3/GCS mechanism design_request's referenceImages already use) converts
+ *       whatever the client actually sent (base64 images) into these URLs before proxying the call
+ *       here — see RULES.md/GAPS.md.
+ *     tags: [VariantTask]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               imageUrls:
+ *                 type: array
+ *                 items: { type: string }
+ *             required: [imageUrls]
+ *     responses:
+ *       200: { description: Images added }
+ *       400: { description: "imageUrls missing/empty, or task's stage isn't 'rn'" }
+ *       404: { description: Variant Task not found }
+ */
+router.post('/:id/images', entityController.addUploadedImages);
 
 /**
  * @swagger
@@ -234,7 +279,7 @@ router.post('/:id/action', entityController.performAction);
  *                   type: string
  *               action:
  *                 type: string
- *                 enum: [assign, start, advance, hold, complete]
+ *                 enum: [assign, start, hold, complete]
  *               actionBy:
  *                 type: string
  *     responses:
