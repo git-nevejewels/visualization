@@ -636,10 +636,15 @@ async function getOptions(id, scope = {}, logContext = {}) {
       );
       if (count === 0) return null;
 
+      // ONE query for everything this function needs from component_set — including
+      // supportedStoneTeamCodes (added 2026-09-21), so the later stone-team-scoped Metal filter
+      // below can be computed entirely in memory from this same result, never a second query.
       const producedRows = await defaultSequelize.query(
-        `SELECT DISTINCT
+        `SELECT
            component_set_details->>'metalTeamId' AS "metalTeamId",
-           component_set_details->>'stoneTeamId' AS "stoneTeamId"
+           component_set_details->>'stoneTeamId' AS "stoneTeamId",
+           component_set_details->>'stoneTeamCode' AS "stoneTeamCode",
+           component_set_details->'supportedStoneTeamCodes' AS "supportedStoneTeamCodes"
          FROM component_set
          WHERE component_set_details->>'baseDesignId' = :id`,
         { replacements: { id }, type: defaultSequelize.QueryTypes.SELECT }
@@ -678,20 +683,27 @@ async function getOptions(id, scope = {}, logContext = {}) {
       // MT values (Band Width etc.) are filtered to what's produced WITH the resolved stone team
       // SPECIFICALLY — not just "produced with some stone team or other" — otherwise a metal value
       // can look pickable but turn out to have never been paired with the chosen Stone Type/Shape at
-      // all, a dead end only discovered at the final match-component-set call. Real example found by
-      // testing: stoneTeamCode "0602" (Natural Yellow Diamond/Emerald) has ZERO component_set rows
-      // at all — confirmed a genuine data gap, not a resolution bug — so no metalTeamCode should ever
-      // resolve as compatible with it. Falls back to "produced with any stone team" only when no
-      // stone team is resolved at all (e.g. a plain-band design with no stone teams to scope by).
+      // all, a dead end only discovered at the final match-component-set call.
+      //
+      // "Produced with this stone team" includes COVERING rows, not just exact stoneTeamId matches
+      // (fixed 2026-09-21 — real bug found: e.g. stoneTeamCode "0602" (Natural Yellow Diamond/
+      // Emerald) has zero rows with that EXACT stoneTeamId, but IS listed in several Natural
+      // Diamond rows' own `supportedStoneTeamCodes` — the same geometry genuinely covers both stone
+      // types, exactly mirroring how a produced row's `supportedMetalTeamCodes` covers a whole Ring
+      // Size range. Verified across BASE_DESIGN-4422: all 16 of its "zero exact production" stone
+      // teams are actually covered by 4-12 real metal teams each — none of them are genuine dead
+      // ends. Computed entirely from `producedRows` (already fetched above) — no second query).
+      // Falls back to "produced with any stone team" only when no stone team is resolved at all
+      // (e.g. a plain-band design with no stone teams to scope by).
       let metalScopedTeamIds = producedMetalTeamIds;
       if (resolvedStoneTeam) {
-        const scopedRows = await defaultSequelize.query(
-          `SELECT DISTINCT component_set_details->>'metalTeamId' AS "metalTeamId"
-           FROM component_set
-           WHERE component_set_details->>'baseDesignId' = :id AND component_set_details->>'stoneTeamId' = :stoneTeamId`,
-          { replacements: { id, stoneTeamId: resolvedStoneTeam.teamId }, type: defaultSequelize.QueryTypes.SELECT }
+        const targetCode = resolvedStoneTeam.teamCode;
+        metalScopedTeamIds = new Set(
+          producedRows
+            .filter(r => r.stoneTeamCode === targetCode || (r.supportedStoneTeamCodes || []).includes(targetCode))
+            .map(r => r.metalTeamId)
+            .filter(Boolean)
         );
-        metalScopedTeamIds = new Set(scopedRows.map(r => r.metalTeamId).filter(Boolean));
       }
       const producedMetalTeams = (details.metalConfig?.metalTeams || []).filter(t => metalScopedTeamIds.has(t.teamId));
 
@@ -757,21 +769,49 @@ function badRequest(message) {
   return err;
 }
 
-// The CAPTAIN/CENTER stone's own weight — never the row's summed `totalStoneWeight`, which is
-// wrong for multi-stone designs (center + side stones summed together). Mirrors D:\work\cad's own
-// pdp entity's identical helper — same component_set JSONB shape (`components[].stoneGroups[]`
-// with `isCaptain`, `stoneDetails[].weightPerStone`), confirmed against our own real data.
-function findCaptainStoneWeight(components = []) {
+// The carat value a customer actually picks matches the SUM of every `isSelectable: true` stone
+// group on the row — not just the captain/center stone alone, and NOT the row's raw
+// `totalStoneWeight` either. Changed 2026-09-21 after two real, opposing counter-examples found by
+// the user cross-checking against the live production site:
+//   - A "Trilogy" design (RF0098090): center (1.0ct, isCaptain/isSelectable:true) + 2 side stones
+//     in a "Main" position (0.4ct each, isCaptain:false but isSelectable:true) — the real site's
+//     carat picker shows "1.80" (all three summed) for this exact product, matching its own
+//     "Total Weight: Approx. 1.8000ct. wt. (1.000ct. x 1, 0.400ct. x 2)" panel. Captain-only (1.0)
+//     would have been wrong here — undercounted.
+//   - A "Side Stone" vintage design (RF0182913): center (0.3ct, isSelectable:true) + 6 small
+//     accent stones in a "Side" position (0.0348ct total, isSelectable:FALSE) — the real site's
+//     carat picker shows "0.30" (center only), and the accents are listed as a wholly separate
+//     "Side Stone" line, never added into the main carat figure. The row's own raw
+//     `totalStoneWeight` (0.3348, everything summed) would have been wrong here — overcounted.
+// `isSelectable` is the one flag that's consistent across both real, opposite-shaped examples —
+// `positionName` isn't reliable on its own (a "Side"-named group can be either included or excluded
+// depending on the design; what distinguishes them is `isSelectable`, not the label). Mirrors
+// D:\work\cad's own pdp entity's captain-only helper in spirit (same component_set JSONB shape,
+// `components[].stoneGroups[].isSelectable`/`.isCaptain`/`.stoneDetails[].totalStoneWeight`), just
+// generalized from "captain only" to "every selectable group" once real data proved captain-only
+// insufficient. NOT yet re-verified against every real design (only these two, plus the existing
+// single-stone regression suite) — user explicitly said to ship this now and revisit later if a
+// further counter-example turns up; see GAPS.md.
+// Returns the total in CARAT POINTS (1ct = 100 points, integer) — never a raw float — mirroring
+// the legacy system's own established pattern (`cart.php`: `$carat_code =
+// round($cart['carat_weight']*100)`) for exactly this reason: summing multiple stoneDetails
+// weights in JS floating point is NOT exact (confirmed: `1 + 0.4 + 0.4 === 1.8` is FALSE, evaluates
+// to 1.7999999999999998) — comparing in whole points sidesteps that entirely with plain integer
+// equality, same as the legacy code already does, rather than inventing a tolerance value.
+function findComponentSetSelectableCaratPoints(components = []) {
+  let points = 0;
+  let sawAny = false;
   for (const component of components) {
     for (const group of component.stoneGroups || []) {
-      if (group.isCaptain) {
-        const detail = (group.stoneDetails || [])[0];
-        const weight = detail?.weightPerStone ?? detail?.totalStoneWeight;
-        return weight != null ? parseFloat(weight) : null;
-      }
+      if (!group.isSelectable) continue;
+      const detail = (group.stoneDetails || [])[0];
+      const weight = detail?.totalStoneWeight ?? detail?.weightPerStone;
+      if (weight == null) continue;
+      points += Math.round(parseFloat(weight) * 100);
+      sawAny = true;
     }
   }
-  return null;
+  return sawAny ? points : null;
 }
 
 // Molds a raw component_set row into a compact, wireframe-aligned shape (mirrors the real
@@ -782,13 +822,16 @@ function findCaptainStoneWeight(components = []) {
 // internal detail this endpoint's caller doesn't need).
 //
 // `dimensionalSelection`/`shape`/`stoneType` are RE-RESOLVED here from base_design's own
-// metalTeams[]/stoneTeams[] catalog (matched by the row's own metalTeamId/stoneTeamId) — even
-// though the caller already supplied the codes that led here, the wireframe echoes the underlying
-// axis VALUES (Ring Size, Band Depth, Shape) back on the matched-variant panel, so this does the
-// same rather than making the caller re-derive them. `carat` is the caller's own input `caratValue`
-// echoed back, since it was never a raw component_set field to begin with (matched via the CAPTAIN
-// stone's own weight, not stored as a top-level column).
-async function moldMatchedComponentSet(row, { baseDesignDetails, caratValue } = {}) {
+// metalTeams[]/stoneTeams[] catalog — even though the caller already supplied the codes that led
+// here, the wireframe echoes the underlying axis VALUES (Ring Size, Band Depth, Shape) back on the
+// matched-variant panel, so this does the same rather than making the caller re-derive them.
+// `dimensionalSelection` is matched by the row's own metalTeamId (unchanged) — but `shape`/
+// `stoneType`/`stoneTeamId`/`stoneTeamCode` are matched by the CALLER's TARGET stoneTeamCode when
+// given, not the row's own stoneTeamId (see `displayStoneTeam` below — 2026-09-21, covering-row
+// fix). `carat` is the caller's own input `caratValue` echoed back, since it was never a raw
+// component_set field to begin with (matched via the CAPTAIN stone's own weight, not stored as a
+// top-level column).
+async function moldMatchedComponentSet(row, { baseDesignDetails, caratValue, targetStoneTeamCode } = {}) {
   const d = row.componentSetDetails || {};
 
   const metalTeam = (baseDesignDetails?.metalConfig?.metalTeams || []).find(t => t.teamId === d.metalTeamId);
@@ -797,8 +840,18 @@ async function moldMatchedComponentSet(row, { baseDesignDetails, caratValue } = 
     if (detail.featureName) dimensionalSelection[detail.featureName] = detail.valueText;
   }
 
-  const stoneTeam = (baseDesignDetails?.stoneConfig?.stoneTeams || []).find(t => t.teamId === d.stoneTeamId);
-  const captainDetail = (stoneTeam?.teamDetails || [])[0];
+  // Stone identity comes from the CALLER's TARGET stoneTeamCode when one was given, NOT the matched
+  // row's own d.stoneTeamId — added 2026-09-21. The matched row can be a COVERING row from a
+  // DIFFERENT stone team (e.g. a Natural Diamond row whose `supportedStoneTeamCodes` also lists
+  // Natural Yellow Diamond's code — same shared geometry, see matchComponentSet's own query
+  // comment/GAPS.md). What the customer actually selected must be preserved here: showing "Natural
+  // Diamond" back to someone who picked "Natural Yellow Diamond" would be wrong, and downstream
+  // consumers (image_request's own dedup key) depend on the REAL selected stoneTeamId, not
+  // whichever row happened to physically match.
+  const displayStoneTeam = targetStoneTeamCode
+    ? (baseDesignDetails?.stoneConfig?.stoneTeams || []).find(t => t.teamCode === targetStoneTeamCode)
+    : (baseDesignDetails?.stoneConfig?.stoneTeams || []).find(t => t.teamId === d.stoneTeamId);
+  const captainDetail = (displayStoneTeam?.teamDetails || []).find(det => det.isCaptain) || (displayStoneTeam?.teamDetails || [])[0];
 
   return {
     componentSetId: row.componentSetId,
@@ -816,8 +869,11 @@ async function moldMatchedComponentSet(row, { baseDesignDetails, caratValue } = 
     subCategory: d.subCategory,
     metalTeamId: d.metalTeamId,
     metalTeamCode: d.metalTeamCode,
-    stoneTeamId: d.stoneTeamId,
-    stoneTeamCode: d.stoneTeamCode,
+    // Stone identity reflects the CALLER's TARGET stoneTeamCode, not necessarily this row's own
+    // d.stoneTeamId — see displayStoneTeam's own comment above. Falls back to the row's own values
+    // when no target was given (plain-band call, or a direct exact match with no covering involved).
+    stoneTeamId: displayStoneTeam?.teamId ?? d.stoneTeamId,
+    stoneTeamCode: displayStoneTeam?.teamCode ?? d.stoneTeamCode,
     dimensionalSelection,
     shape: captainDetail?.shape,
     stoneType: captainDetail?.stoneType,
@@ -840,6 +896,15 @@ async function moldMatchedComponentSet(row, { baseDesignDetails, caratValue } = 
 // directly (not collectionNumber like PDP) — our own component_set data has a reliable baseDesignId
 // on every row, so there's no need for PDP's extra Merchandising round-trip just to look up
 // collectionNumber first.
+//
+// Matches a COVERING stone-team row too, not just an exact stoneTeamCode — added 2026-09-21, same
+// real bug/fix as getOptions' own metalScopedTeamIds above: a row's `supportedStoneTeamCodes` can
+// legitimately cover an entirely different stone type sharing the same geometry (e.g. a Natural
+// Diamond row also covering Natural Yellow Diamond) — a single OR condition added to the SAME
+// query, no extra round trip. (Metal side stays exact-match — see the query's own comment for why.)
+// moldMatchedComponentSet is told the caller's TARGET stoneTeamCode separately, so its response
+// reflects what was actually selected even when the matched row is a covering row from a different
+// stone team.
 async function matchComponentSet(id, { metalTeamCode, stoneTeamCode, caratValue } = {}, logContext = {}) {
   if (!metalTeamCode) throw badRequest('metalTeamCode is required');
   if (stoneTeamCode === undefined) {
@@ -857,12 +922,22 @@ async function matchComponentSet(id, { metalTeamCode, stoneTeamCode, caratValue 
 
   return executeOperation(
     async () => {
+      // Metal side stays an EXACT match, deliberately — the metalTeamCode arriving here has already
+      // been through getOptions' own Ring-Size-covering resolution (resolveMetalTeamForRingSize),
+      // which always returns the COVERING team's own real, directly-matchable code, never a code
+      // that still needs further covering logic here. Adding a second covering check on this side
+      // would risk matching unrelated rows whose supportedMetalTeamCodes happens to overlap and
+      // silently turning what should be a clean single-row match into an ambiguous multi-row one —
+      // not worth the risk for a case that was already verified working end-to-end.
       const rows = await defaultSequelize.query(
         `SELECT component_set_id AS "componentSetId", component_set_details AS "componentSetDetails"
          FROM component_set
          WHERE component_set_details->>'baseDesignId' = :id
            AND component_set_details->>'metalTeamCode' = :metalTeamCode
-           AND component_set_details->>'stoneTeamCode' = :stoneTeamCode`,
+           AND (
+             component_set_details->>'stoneTeamCode' = :stoneTeamCode
+             OR component_set_details->'supportedStoneTeamCodes' @> to_jsonb(:stoneTeamCode::text)
+           )`,
         { replacements: { id, metalTeamCode, stoneTeamCode }, type: defaultSequelize.QueryTypes.SELECT }
       );
 
@@ -870,15 +945,18 @@ async function matchComponentSet(id, { metalTeamCode, stoneTeamCode, caratValue 
 
       // Plain-band pair — no stones, so no carat to match against. The
       // (baseDesignId, metalTeamCode, stoneTeamCode="") key is expected to already be unique.
+      const targetCaratPoints = stoneTeamCode ? Math.round(targetCarat * 100) : null;
       const matched = !stoneTeamCode
         ? (rows.length === 1 ? rows[0] : null)
-        : rows.find(r => findCaptainStoneWeight(r.componentSetDetails?.components) === targetCarat) || null;
+        : rows.find(r => findComponentSetSelectableCaratPoints(r.componentSetDetails?.components) === targetCaratPoints) || null;
       if (!matched) return null;
 
       // Single-row Merchandising fetch to re-resolve the matched row's own axis VALUES (Ring Size,
-      // Band Width, Shape) for the molded response — see moldMatchedComponentSet.
+      // Band Width, Shape) for the molded response — see moldMatchedComponentSet. stoneTeamCode is
+      // passed through as the TARGET so the response reflects what was actually selected even when
+      // `matched` turned out to be a covering row from a different stone team.
       const body = await fetchJson(merchandisingUrl(`/${id}`), logContext);
-      return moldMatchedComponentSet(matched, { baseDesignDetails: body.data?.base_design_details, caratValue });
+      return moldMatchedComponentSet(matched, { baseDesignDetails: body.data?.base_design_details, caratValue, targetStoneTeamCode: stoneTeamCode });
     },
     {
       processName: logContext.processName || 'MatchComponentSet_base_design',
