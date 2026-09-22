@@ -31,18 +31,9 @@ async function getById(req, res, next) {
 async function getOptions(req, res, next) {
   const { correlationId } = req.correlationContext || {};
   try {
-    const { stoneTeamId, metalSelections: metalSelectionsRaw } = req.query;
+    const { stoneTeamId } = req.query;
 
-    let metalSelections;
-    if (metalSelectionsRaw !== undefined) {
-      try {
-        metalSelections = JSON.parse(metalSelectionsRaw);
-      } catch {
-        return res.status(400).json({ status: 400, error: 'metalSelections must be valid JSON, e.g. {"Band Width":"01","Ring Size":"06"}', correlationId });
-      }
-    }
-
-    const result = await entityService.getOptions(req.params.id, { stoneTeamId, metalSelections }, { correlationId, processName: 'GetOptions_base_design' });
+    const result = await entityService.getOptions(req.params.id, { stoneTeamId }, { correlationId, processName: 'GetOptions_base_design' });
     if (!result.data) {
       const message = stoneTeamId
         ? `base_design not found, has no component_set variants yet, or no stone team matches stoneTeamId=${stoneTeamId}`

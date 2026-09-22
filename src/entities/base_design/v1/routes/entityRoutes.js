@@ -57,13 +57,14 @@ router.use((req, res, next) => {
  *       from separate `stoneType`+`shape` TEXT params — mirrors D:\work\cad's own pdp v2 entity,
  *       which never resolves a stone team from text either (its SKU URL already carries the code).
  *
- *       Once a value is picked for every MT feature, pass them as `metalSelections` (a JSON object,
- *       {featureName: valueCode} — valueCode, not valueText, since 2026-09-21, same reasoning as
- *       stoneTeamId above: the caller already has each pill's own code from this response) to
- *       resolve the matching PRODUCED metal team the same way, getting back its real
- *       `metalTeamId`/`metalTeamCode`. Neither team code is ever reconstructed by concatenating
- *       value codes — both are read directly off the one exact team that matches.
- *       Pass BOTH resolved codes to GET /{id}/match-component-set to get the final componentSetId.
+ *       Metal-team resolution moved CLIENT-SIDE 2026-09-22, per the frontend team's own request —
+ *       there is no longer a server-side `metalSelections` resolve param. The frontend concatenates
+ *       the selected `isDimensional: true` MT features' own `valueCode`s, IN THIS RESPONSE'S OWN
+ *       ARRAY ORDER, to build `metalTeamCode` itself, and sends that flat code straight to
+ *       GET /{id}/match-component-set (which resolves it exact-match OR covering, mirroring the
+ *       stone side) — exactly like `stoneTeamCode` already works. Non-dimensional `affectsImage`-only
+ *       features (e.g. "Band Finish") are excluded from the concatenation — see `isDimensional` below
+ *       and docs/api/base_design.md's "Client-side metal team resolution" section.
  *     tags: [BaseDesign]
  *     parameters:
  *       - in: path
@@ -74,19 +75,13 @@ router.use((req, res, next) => {
  *         name: stoneTeamId
  *         schema: { type: string }
  *         description: One stone team's teamId (e.g. "ST0000") — read off this same endpoint's own unscoped `stone_type` group's `shapes[].stoneTeamId`, never resolved from stoneType/shape text.
- *       - in: query
- *         name: metalSelections
- *         schema: { type: string }
- *         description: 'JSON object of {featureName: valueCode} for every MT feature, e.g. {"Band Width":"01","Ring Size":"06"}.'
  *     responses:
  *       200:
  *         description: >
  *           { baseDesignId, variantCount,
- *             options: [{ featureId, name, partOf: "MT"|"ST"|"SF"|"CT",
+ *             options: [{ featureId, name, partOf: "MT"|"ST"|"SF"|"CT", isDimensional?,
  *                          values: [{ valueCode?, valueText, shapes?: [{valueText, stoneTeamId, stoneTeamCode}] }] }],
- *             stoneTeamId?, stoneTeamCode?, isDefaultStoneSelection?, metalTeamId?, metalTeamCode? }
- *       400:
- *         description: metalSelections isn't valid JSON
+ *             stoneTeamId?, stoneTeamCode?, isDefaultStoneSelection? }
  *       404:
  *         description: base_design not found, has no component_set variants yet, or (when scoped) no PRODUCED stone team matches the given stoneTeamId
  */
@@ -98,18 +93,27 @@ router.get('/:id/options', entityController.getOptions);
  *   get:
  *     summary: Resolve a (metalTeamCode, stoneTeamCode[, caratValue]) selection down to one concrete component_set
  *     description: |
- *       Takes a metalTeamCode/stoneTeamCode the FRONTEND has built from the `valueCode`s in
- *       `/{id}/options`'s response and resolves the ONE component_set row matching them — the
- *       actual variant/geometry to attach to an image_request. Mirrors D:\work\cad's own pdp
- *       entity's `findComponentSetByExactSelection` (see GAPS.md): SQL-filters by baseDesignId +
- *       metalTeamCode + stoneTeamCode, then matches the CAPTAIN/CENTER stone's own weight against
- *       caratValue (never the row's summed totalStoneWeight).
+ *       Takes a metalTeamCode (resolved CLIENT-SIDE by concatenating selected feature valueCodes —
+ *       see /{id}/options above) and stoneTeamCode from `/{id}/options`'s response and resolves the
+ *       ONE component_set row matching them — the actual variant/geometry to attach to an
+ *       image_request. Mirrors D:\work\cad's own pdp entity's `findComponentSetByExactSelection`
+ *       (see GAPS.md): SQL-filters by baseDesignId + metalTeamCode (exact match OR covering — matches
+ *       the row's own code OR its `supportedMetalTeamCodes`, changed 2026-09-22 since the frontend's
+ *       concatenated code may be a valid combination that was never itself produced but IS covered by
+ *       a real row's Ring Size resizing tolerance) + stoneTeamCode (covering-code aware the same way —
+ *       matches the row's own code OR its `supportedStoneTeamCodes`, see GAPS.md), then matches
+ *       caratValue against the SUM of every `isSelectable: true` stone group on the row, in whole
+ *       carat points (changed 2026-09-21 — never just the captain/center stone alone, and never the
+ *       row's raw totalStoneWeight either; see GAPS.md for the real counter-examples that drove this).
  *
  *       caratValue is required whenever stoneTeamCode is non-empty (a stoned pair). Pass an empty
- *       stoneTeamCode with no caratValue for a plain-band pair. NOTE (see GAPS.md): a real data gap
- *       was found where multiple component_set rows can share the exact same (baseDesignId,
- *       metalTeamCode, stoneTeamCode="") key with no other distinguishing field — this endpoint
- *       returns 404 (not a guess) when that happens, rather than silently picking one.
+ *       stoneTeamCode with no caratValue for a plain-band pair. NOTE (see GAPS.md): TWO real, distinct
+ *       data gaps can each make a match genuinely ambiguous — (1) multiple component_set rows sharing
+ *       the exact same (baseDesignId, metalTeamCode, stoneTeamCode="") key with no other
+ *       distinguishing field, and (2) two different produced metal teams' own `supportedMetalTeamCodes`
+ *       ranges overlapping on the same covered code with an identical stone team and carat (a Ring
+ *       Size resizing-tolerance overlap with no other feature to disambiguate). This endpoint returns
+ *       404 (not a guess) in either case, rather than silently picking one.
  *     tags: [BaseDesign]
  *     parameters:
  *       - in: path

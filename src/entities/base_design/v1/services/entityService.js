@@ -527,7 +527,12 @@ function buildOptionsList({ metalFeatures, producedMetalTeams, allStoneTeams, st
   const options = [];
 
   for (const f of deriveDimensionalFeatures(metalFeatures, producedMetalTeams)) {
-    options.push({ featureId: f.legacyFeature, name: f.featureName, partOf: 'MT', values: f.values });
+    // `isDimensional` (2026-09-22) — team-forming features (Band Width, Ring Size, etc.) are part of
+    // `metalTeamCode`; non-team `affectsImage`-only features (e.g. "Band Finish") are NOT. The
+    // frontend needs this to know which MT groups to fold into its own `metalTeamCode` concatenation
+    // (in this SAME array order — see docs/api/base_design.md's "Client-side metal team resolution")
+    // and which to skip.
+    options.push({ featureId: f.legacyFeature, name: f.featureName, partOf: 'MT', isDimensional: f.isDimensional, values: f.values });
   }
 
   const stoneTypes = deriveStoneAxisValues(allStoneTeams);
@@ -545,61 +550,24 @@ function buildOptionsList({ metalFeatures, producedMetalTeams, allStoneTeams, st
   return options;
 }
 
-// Resolves which PRODUCED metal team a full metalSelections map matches, accounting for Ring
-// Size's exemption from production-filtering (see deriveDimensionalFeatures/RULES.md). Ring Size
-// doesn't need its own component_set row per size — resizing doesn't change the geometry — so ONE
-// produced row's own `supportedMetalTeamCodes` (found on component_set, NOT base_design) covers a
-// whole RANGE of Ring Size variants. Mirrors PDP's own `resolveBaseMetalTeam` fallback (see GAPS.md):
-//   1. Fast path: a produced team whose OWN canonical Ring Size already equals the selection —
-//      exact match on every feature, same as every other MT feature.
-//   2. Fallback: for each produced team matching every OTHER feature (ignoring Ring Size), read
-//      that team's own produced component_set row's `supportedMetalTeamCodes`. The Ring Size code
-//      segment length is taken from the CANDIDATE'S OWN known-correct Ring Size valueCode (never a
-//      guessed/hardcoded split) — strip that many characters off each supported code's end and
-//      compare directly against the user's selected Ring Size CODE. This never assumes a
-//      concatenation order or recipe — it only reads real, already-stored codes.
+// Metal-team resolution (matching a user's picked {featureName: valueCode} combination to the one
+// real `metalTeamCode`) moved CLIENT-SIDE 2026-09-22, per the frontend team's own request — the
+// frontend concatenates the selected features' own `valueCode`s (verified stable for rings — 1,426
+// real teams, zero mismatches) and sends the result straight to `/:id/match-component-set`, which
+// resolves it exact-match OR covering (mirroring the stone side — see matchComponentSet's own
+// comment). There is no longer a server-side `/options?metalSelections=` resolve step.
 //
-// Matches on valueCode, not valueText (changed 2026-09-21 — optimization: the frontend already has
-// each pill's valueCode from the /options response it rendered the pill from, so it can send that
-// straight back instead of the display label — same reliability, since valueCode already verified
-// consistent per (featureName, valueCode) across every real base_design checked, just a shorter/
-// cheaper string to carry and compare).
-function resolveMetalTeamForRingSize(producedMetalTeams, metalFeatures, metalSelections) {
-  const ringSizeFeature = metalFeatures.find(f => f.legacyFeature === RING_SIZE_LEGACY_FEATURE);
-  const ringSizeFeatureName = ringSizeFeature?.featureName;
-  const selectedRingSizeCode = ringSizeFeatureName ? metalSelections[ringSizeFeatureName] : undefined;
-
-  const otherSelections = { ...metalSelections };
-  if (ringSizeFeatureName) delete otherSelections[ringSizeFeatureName];
-
-  const candidates = producedMetalTeams.filter(t => {
-    const teamValues = new Map((t.teamDetails || []).map(d => [d.featureName, d.valueCode]));
-    return Object.entries(otherSelections).every(([featureName, valueCode]) => teamValues.get(featureName) === valueCode);
-  });
-
-  if (!selectedRingSizeCode) return candidates[0] || null;
-
-  const exact = candidates.find(t => (t.teamDetails || []).some(d => d.featureName === ringSizeFeatureName && d.valueCode === selectedRingSizeCode));
-  if (exact) return exact;
-
-  for (const candidate of candidates) {
-    const ownRingSizeDetail = (candidate.teamDetails || []).find(d => d.featureName === ringSizeFeatureName);
-    if (!ownRingSizeDetail?.valueCode) continue;
-
-    // supportedMetalTeamCodes is already ON the team object itself (base_design's own metalTeams
-    // response) — no DB round trip needed to read it. Mirrors D:\work\cad's pdp v2 entity's own
-    // resolveBaseMetalTeam() (resolveSkuSelection.js), which resolves the exact same kind of
-    // "covering team" fallback purely in-memory off `t.supportedMetalTeamCodes`, never a query.
-    // Previously this queried `component_set` directly for the same data — confirmed redundant
-    // 2026-09-21, since it's already denormalized onto the team object we already have in hand.
-    const supportedCodes = candidate.supportedMetalTeamCodes || [];
-    const suffixLength = ownRingSizeDetail.valueCode.length;
-    const covers = supportedCodes.some(code => String(code).replace(/^MT/, '').slice(-suffixLength) === selectedRingSizeCode);
-    if (covers) return candidate;
-  }
-
-  return null;
-}
+// An earlier version of this change also exposed a `producedMetalTeams` list so the frontend could
+// run the OLD two-step "filter by other features, then check Ring Size covering" algorithm
+// (formerly `resolveMetalTeamForRingSize`, removed) — reverted 2026-09-22 after checking whether
+// that two-step order actually disambiguates anything in real data: scanned every real base_design
+// with an overlapping-covering-range case (118 of them) and found the "other features" step NEVER
+// narrows anything — in every real case, the two overlapping teams have IDENTICAL non-Ring-Size
+// features (they only differ in Ring Size itself). So the two-step algorithm added complexity
+// without adding safety; see GAPS.md for the full trail, including the `BASE_DESIGN-4804` example
+// that turned out to have no Band Width at all (an incorrect example caught and corrected).
+// The overlapping-range case itself is a genuine, pre-existing, irreducible data gap — see
+// matchComponentSet's own handling of it below (returns null/404 rather than guessing).
 
 // GET /:id/options — the PRODUCIBLE feature catalog for a "raise request" screen, as ONE flat list
 // (see buildOptionsList). Manager-confirmed 2026-09-16 (see GAPS.md): MT/ST values must come from
@@ -622,12 +590,13 @@ function resolveMetalTeamForRingSize(producedMetalTeams, metalFeatures, metalSel
 // principle as before. Changed 2026-09-21 from `stoneType`+`shape` TEXT params to a single
 // `stoneTeamId` — mirrors D:\work\cad's own pdp v2 entity, which never resolves a stone team from
 // text either (its SKU URL already carries the code, looked up with a plain `.find()`; see
-// deriveStoneAxisValues's own comment). The frontend builds its own metalTeamCode/stoneTeamCode
-// from the values here and passes those to `/:id/match-component-set` — this endpoint never
-// resolves or returns a team id itself... except stoneTeamId, which is now an INPUT here, not an
-// output resolved from something else.
+// deriveStoneAxisValues's own comment). stoneTeamId is an INPUT here, not an output resolved from
+// something else. Metal-team resolution (a user's picked features -> `metalTeamCode`) is resolved
+// CLIENT-SIDE from this response's own per-feature `valueCode`s, then sent straight to
+// `/:id/match-component-set` — see the comment above this function for why (and why an earlier,
+// reverted version of this change also returned a `producedMetalTeams` list).
 async function getOptions(id, scope = {}, logContext = {}) {
-  const { stoneTeamId, metalSelections } = scope;
+  const { stoneTeamId } = scope;
   return executeOperation(
     async () => {
       const [{ count }] = await defaultSequelize.query(
@@ -732,25 +701,6 @@ async function getOptions(id, scope = {}, logContext = {}) {
         response.stoneTeamId = resolvedStoneTeam.teamId;
         response.stoneTeamCode = resolvedStoneTeam.teamCode;
         if (isDefaultStoneSelection) response.isDefaultStoneSelection = true;
-      }
-
-      // Optional: once the caller has picked a value for every MT feature, resolve which real,
-      // PRODUCED metal team that combination matches — same "find the one exact team" approach as
-      // the stone side above, never a concatenated code. `metalSelections` is a plain
-      // {featureName: valueCode} map (e.g. {"Band Width":"01","Ring Size":"06"}) — valueCode, not
-      // valueText, since 2026-09-21: the caller already has each pill's own valueCode from the
-      // /options response it rendered the pill from, so it can send that straight back (shorter,
-      // and just as reliable — verified consistent per (featureName, valueCode) across every real
-      // base_design checked) instead of the display label. Ring Size gets special handling (see
-      // resolveMetalTeamForRingSize) since it's exempt from production filtering — a selected Ring
-      // Size the design shows but never produced on its OWN is still resolved correctly via the
-      // covering team's `supportedMetalTeamCodes`.
-      if (metalSelections && Object.keys(metalSelections).length > 0) {
-        const resolvedMetalTeam = resolveMetalTeamForRingSize(producedMetalTeams, details.metalConfig?.metalFeatures || [], metalSelections);
-        if (resolvedMetalTeam) {
-          response.metalTeamId = resolvedMetalTeam.teamId;
-          response.metalTeamCode = resolvedMetalTeam.teamCode;
-        }
       }
 
       return response;
@@ -922,18 +872,23 @@ async function matchComponentSet(id, { metalTeamCode, stoneTeamCode, caratValue 
 
   return executeOperation(
     async () => {
-      // Metal side stays an EXACT match, deliberately — the metalTeamCode arriving here has already
-      // been through getOptions' own Ring-Size-covering resolution (resolveMetalTeamForRingSize),
-      // which always returns the COVERING team's own real, directly-matchable code, never a code
-      // that still needs further covering logic here. Adding a second covering check on this side
-      // would risk matching unrelated rows whose supportedMetalTeamCodes happens to overlap and
-      // silently turning what should be a clean single-row match into an ambiguous multi-row one —
-      // not worth the risk for a case that was already verified working end-to-end.
+      // Metal side is now exact-match OR covering-containment (changed 2026-09-22, mirroring the
+      // stone side below) — `metalTeamCode` arriving here is the FRONTEND's own concatenation of the
+      // selected features' valueCodes (verified stable for rings — 1,426 real teams, zero
+      // mismatches; see GAPS.md), which may be a code that was never itself produced but IS covered
+      // by a real team's `supportedMetalTeamCodes` (Ring Size resizing tolerance — see RULES.md).
+      // Containment ALONE is not enough — 1,332 real rows have a genuine `metalTeamCode` but an
+      // EMPTY `supportedMetalTeamCodes` (never populated upstream); dropping the exact-match branch
+      // would make those rows unreachable even on a dead-on exact selection. Checked and rejected
+      // 2026-09-22 (see GAPS.md).
       const rows = await defaultSequelize.query(
         `SELECT component_set_id AS "componentSetId", component_set_details AS "componentSetDetails"
          FROM component_set
          WHERE component_set_details->>'baseDesignId' = :id
-           AND component_set_details->>'metalTeamCode' = :metalTeamCode
+           AND (
+             component_set_details->>'metalTeamCode' = :metalTeamCode
+             OR component_set_details->'supportedMetalTeamCodes' @> to_jsonb(('MT' || :metalTeamCode)::text)
+           )
            AND (
              component_set_details->>'stoneTeamCode' = :stoneTeamCode
              OR component_set_details->'supportedStoneTeamCodes' @> to_jsonb(:stoneTeamCode::text)
@@ -945,10 +900,23 @@ async function matchComponentSet(id, { metalTeamCode, stoneTeamCode, caratValue 
 
       // Plain-band pair — no stones, so no carat to match against. The
       // (baseDesignId, metalTeamCode, stoneTeamCode="") key is expected to already be unique.
+      //
+      // For a stoned pair, MULTIPLE rows can genuinely satisfy the same carat here — a real,
+      // pre-existing data gap found 2026-09-22 (see GAPS.md): two different produced metal teams'
+      // OWN `supportedMetalTeamCodes` ranges can overlap on the SAME Ring Size code with no other
+      // feature to tell them apart (e.g. `BASE_DESIGN-4804`: teams "34" and "42" both cover Ring
+      // Size codes 40/41, same stone team, same carat). Rather than silently picking whichever row
+      // Postgres happens to return first, filter to ALL rows matching the target carat points and
+      // only return one when exactly one exists — same "404, not a guess" precedent already used for
+      // the plain-band ambiguous-key case below.
       const targetCaratPoints = stoneTeamCode ? Math.round(targetCarat * 100) : null;
-      const matched = !stoneTeamCode
-        ? (rows.length === 1 ? rows[0] : null)
-        : rows.find(r => findComponentSetSelectableCaratPoints(r.componentSetDetails?.components) === targetCaratPoints) || null;
+      let matched;
+      if (!stoneTeamCode) {
+        matched = rows.length === 1 ? rows[0] : null;
+      } else {
+        const caratMatches = rows.filter(r => findComponentSetSelectableCaratPoints(r.componentSetDetails?.components) === targetCaratPoints);
+        matched = caratMatches.length === 1 ? caratMatches[0] : null;
+      }
       if (!matched) return null;
 
       // Single-row Merchandising fetch to re-resolve the matched row's own axis VALUES (Ring Size,
