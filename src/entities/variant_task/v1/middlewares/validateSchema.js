@@ -102,12 +102,9 @@ const validateEntity = (req, res, next) => {
 
     const jsonSchema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
     const joiSchema = convertJsonSchemaToJoi(jsonSchema);
-    // bulkCreate posts an array body through this SAME middleware — validate each
-    // element against the entity schema instead of the whole array against it
-    // (previously failed every bulkCreate call with '"value" must be of type
-    // object', since Joi.object() rejects an array outright before ever reaching
-    // the controller/service). Same fix already applied to image_request's own
-    // copy of this file 2026-09-17 — see GAPS.md.
+    // bulkCreate posts an array body through this same middleware — validate each
+    // element against the entity schema rather than the whole array, since
+    // Joi.object() rejects an array outright.
     const schemaToValidate = Array.isArray(req.body)
       ? Joi.array().items(joiSchema).min(1)
       : joiSchema;

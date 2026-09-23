@@ -100,13 +100,9 @@ async function deleteEntity(req, res, next) {
   } catch (error) { next(error); }
 }
 
-// --------------------
-// Task workflow actions — see ARCHITECTURE.md / RULES.md.
-// Mirrors design_request's own getByStats() controller pattern for surfacing a
-// service-thrown `error.status === 400` (an illegal state transition, or a
-// missing/unknown action) as a proper 400 instead of falling through to the
-// global error handler as a 500.
-// --------------------
+// Task workflow actions. A service-thrown `error.status === 400` (illegal state
+// transition, or a missing/unknown action) is surfaced as a proper 400 here instead
+// of falling through to the global error handler as a 500.
 async function performAction(req, res, next) {
   const { correlationId, traceId, spanId } = req.correlationContext || {};
   const userId = req.headers['x-user-id'] || req.user?.email;
@@ -169,11 +165,8 @@ async function handleCadFileUploaded(req, res, next) {
   }
 }
 
-// --------------------
-// POST /:id/images — see RULES.md/GAPS.md's 2026-09-19 image-upload entry. Body carries already-
-// uploaded URLs (bff-for-app's imageUpload.service.js pre-hook converts raw bytes to S3/GCS URLs
-// before this is ever called) — this endpoint never receives raw file bytes.
-// --------------------
+// POST /:id/images — body carries already-uploaded URLs (an upstream pre-hook converts raw
+// bytes to S3/GCS URLs before this is ever called); this endpoint never receives raw file bytes.
 async function addUploadedImages(req, res, next) {
   const { correlationId, traceId, spanId } = req.correlationContext || {};
   const userId = req.headers['x-user-id'] || req.user?.email;

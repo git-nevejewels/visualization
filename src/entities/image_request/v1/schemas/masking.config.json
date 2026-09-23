@@ -1,4 +1,0 @@
-{
-  "_comment": "Only list fields you WANT to mask. Unlisted fields pass through untouched. Field names are matched at ANY nesting depth.",
-  "rules": []
-}

@@ -59,19 +59,10 @@ const getValidationSchema = () => {
 // --------------------
 // CRUD Helpers
 // --------------------
-// Matches D:\work\cad\src\entities\{cad_request,component}\v1\services\entityService.js
-// byte-for-byte (the newer of two incompatible buildWhereClause patterns found
-// across cad/mdm/merchandising — the older one, still present in most other
-// entities including design_request, silently never worked: it used a
-// Sequelize.literal instance as a computed object key, which JS coerces to
-// the string "[object Object]"). Adopted here instead of a bespoke fix so
-// Visualization matches the ecosystem's own newest precedent rather than
-// introducing a fourth variant. NOTE the calling convention this implies:
-// filterQuery keys must be fully qualified with the JSONB column name to
-// reach into it, e.g. {"variant_task_details.componentSetId": "..."} or the
-// equivalent nested form {"variant_task_details": {"componentSetId": "..."}}
-// — a bare {"componentSetId": "..."} is treated as a literal top-level
-// column (which doesn't exist) and will error, same as in cad_request/component.
+// filterQuery keys must be fully qualified with the JSONB column name to reach into it,
+// e.g. {"variant_task_details.componentSetId": "..."} or the nested form
+// {"variant_task_details": {"componentSetId": "..."}} — a bare {"componentSetId": "..."}
+// is treated as a literal top-level column and will error.
 const buildWhereClause = (filterQuery = {}, parentKey = '', whereClause = {}) => {
   if (!filterQuery || typeof filterQuery !== 'object') return whereClause;
   Object.entries(filterQuery).forEach(([key, value]) => {
@@ -126,16 +117,8 @@ const getUpdatedFields = (oldObj, newObj, prefix = '') => {
 // CRUD Operations
 // Each accepts an optional logContext param: { correlationId, processName }
 // --------------------
-// Defaults status to 'Ready' (both the top-level column AND variant_task_details.status) when the
-// caller doesn't supply one — matching the exact convention createNextStageTaskIfNeeded already
-// uses when it auto-creates an obj/rn task (see below). Without this, a freshly created task had
-// NO status at all (`status: data.status` was simply `undefined` unless a caller explicitly passed
-// one — nothing in this codebase did), and performAction's own transition logic requires 'Ready'
-// before 'assign' can ever succeed — so a task created through this public endpoint could never
-// enter the assign/start/advance/hold/complete workflow at all. Found 2026-09-15 while testing
-// image_request's dashboard rollup — see GAPS.md. The top-level column and the JSONB copy are two
-// separately-writable facts kept in sync only by convention (performAction does this correctly on
-// every transition) — this fix keeps create() consistent with that same convention.
+// Defaults status to 'Ready' (both the top-level column and variant_task_details.status) when the
+// caller doesn't supply one, since performAction requires 'Ready' before a task can be assigned.
 async function create(data, logContext = {}) {
   const model = getEntityModel();
   const detailsField = getDetailsField();
@@ -321,23 +304,13 @@ async function deleteEntity(id, logContext = {}) {
 }
 
 // --------------------
-// Task workflow actions — see ARCHITECTURE.md's "Task workflow" API surface and
-// RULES.md. Mirrors visualization_studio_v15.html's assign()/start()/hold()/complete(),
-// tightened into real preconditions since an API has no UI to gate which button is even
-// shown (the wireframe's own functions don't self-validate — only the UI decides which
-// one to expose via primary()). The wireframe's own advance() (walking Tool
-// config/Keyshot/Photoshop before completing rn) was REMOVED 2026-09-21 — manager decision
-// to skip those internal render sub-steps entirely; rn now completes the same way zb/obj
-// do, straight from 'In progress'. `uploadedImages` gating on rn's `complete` is unchanged.
+// Task workflow actions — assign/start/hold/complete, each only legal from specific
+// current statuses. rn additionally requires uploadedImages before it can complete.
 //
-// Deliberately NOT routed through executeOperation() for the validation step:
-// queryExecutor.js's catch-all collapses every thrown error to a generic 500
-// (it only special-cases SequelizeValidationError/SequelizeUniqueConstraintError/
-// a Connection-named error) — a plain Error with a custom `.status = 400` would
-// silently become an unhelpful 500. design_request's own getByStats() avoids
-// this the same way: validate and throw BEFORE calling executeOperation, so the
-// error reaches the controller directly (see entityController.js's
-// `if (error.status === 400)` handling, copied from that same precedent).
+// Validation happens before executeOperation() is called, not inside it:
+// queryExecutor.js collapses any error it doesn't recognize to a generic 500, so a
+// plain Error with a custom `.status = 400` needs to reach the controller directly
+// (see entityController.js's `if (error.status === 400)` handling).
 // --------------------
 const STAGE_ORDER = ['zb', 'obj', 'rn'];
 const VALID_ACTIONS = ['assign', 'start', 'hold', 'complete'];
@@ -350,9 +323,8 @@ function badRequest(message) {
 
 // Returns { status, setAssignee?, setAssigneeIfMissing?, isComplete? } or throws
 // a 400 if `action` isn't legal from `currentStatus`/`stage` right now. `details`
-// is the task's own JSONB blob — needed only to check `uploadedImages` on a render
-// (rn) 'complete' (CLAUDE.md's stated rule: rn needs >=1 uploaded image before
-// Completed — see RULES.md/GAPS.md for the 2026-09-19 fix that actually enforces it).
+// is the task's own JSONB blob, needed only to check `uploadedImages` on a render
+// (rn) 'complete'.
 function computeTransition(action, stage, currentStatus, details = {}) {
   if (!VALID_ACTIONS.includes(action)) {
     throw badRequest(`Unknown action '${action}'. Must be one of: ${VALID_ACTIONS.join(', ')}`);
@@ -382,10 +354,6 @@ function computeTransition(action, stage, currentStatus, details = {}) {
     return { status: 'On hold' };
   }
 
-  // action === 'complete' — rn's own Tool config/Keyshot/Photoshop sub-chain was removed 2026-09-21
-  // (manager decision: skip those internal render steps entirely) — rn now completes the same way
-  // zb/obj do, straight from 'In progress'. The separate uploadedImages guard below is UNCHANGED —
-  // removing the sub-chain doesn't relax that rule.
   if (currentStatus !== 'In progress') {
     throw badRequest(`Cannot complete — status is '${currentStatus}', must be 'In progress'`);
   }
@@ -515,8 +483,7 @@ async function performAction(id, action, payload = {}, logContext = {}) {
 
 // Applies the same action to multiple ids. Not atomic — each id succeeds or
 // fails independently and every outcome is reported, so one invalid transition
-// in a batch never blocks the rest (matches the wireframe's own bulk(), which
-// loops calling the action function per selected row regardless of the others).
+// in a batch never blocks the rest.
 async function bulkPerformAction(ids, action, payload = {}, logContext = {}) {
   const results = [];
   for (const id of ids) {
@@ -530,35 +497,12 @@ async function bulkPerformAction(ids, action, payload = {}, logContext = {}) {
   return results;
 }
 
-// POST /api/variant_task/v1/cad-file-uploaded — called by CAD's own service directly
-// (service-to-service, not through the BFF), right after their CAD user pastes the FG CAD file's
-// existing shared-drive path into a plain textbox on CAD's side and
-// `component_set_details.componentSetCadPath` is set to that same string. Manager decision
-// 2026-09-17 (revised further 2026-09-17): there is NO cloud upload anywhere in this flow — CAD
-// users already save .3dm files to an existing "FG CAD" shared drive; `cadFilePath` is just that
-// path string, copied through unchanged. This is a fire-and-forget NOTIFICATION, not a file
-// transfer — no file bytes ever pass through Visualization, and never did. CAD has NO concept of
-// Visualization's own `image_request` entity or
-// `imageRequestId` (confirmed 2026-09-16 by reading D:\work\cad in full — no match anywhere for
-// "image_request"/"imageRequestId"/"visualization"/"FG Ready" — see GAPS.md), so this takes ONLY
-// `componentSetId` (+ `cadFilePath`, see below) and resolves which image_request(s) are actually
-// waiting on it ITSELF.
-//
-// The same componentSetId can legitimately sit in more than one open request's own basket (two
-// different people raising separate requests that happen to pick the same variant) — this creates
-// a `zb` task for EVERY matching request that doesn't already have one, not just the first, since
-// each request tracks its own variant_task rows independently. Zero matches is a valid, quiet
-// no-op (nothing is currently waiting on this variant) — not an error, since CAD may upload a file
-// for a variant nobody has requested images for yet.
-//
-// Idempotent by construction: re-calling for a componentSetId that already has a `zb` task for a
-// given request just skips that request (added to `alreadyExistedFor`) rather than duplicating it
-// — safe for CAD to retry this call if their own outbound call fails and they retry it.
-//
-// Deliberately a single direct call, no reconciliation poll on our side (2026-09-16 decision) —
-// the known risk (a failed/never-retried call silently leaves a variant stuck with no zb task) is
-// accepted for now rather than building a poller against the shared component_set table; revisit
-// if that risk turns out to matter in practice.
+// Called by CAD's own service directly (service-to-service, not through the BFF) once a
+// component set's CAD file path is set. Fire-and-forget notification — no file bytes pass
+// through Visualization. Resolves which image_request(s) are waiting on this componentSetId
+// and creates a `zb` task for each matching request that doesn't already have one; zero matches
+// is a valid no-op. Idempotent — retrying for a componentSetId that already has a `zb` task for
+// a given request just skips it.
 async function handleCadFileUploaded(componentSetId, cadFilePath, logContext = {}) {
   if (!componentSetId) {
     const err = new Error('componentSetId is required');
@@ -571,23 +515,19 @@ async function handleCadFileUploaded(componentSetId, cadFilePath, logContext = {
     throw err;
   }
 
-  const imageRequestModel = defaultSequelize.models['image_request'];
-  if (!imageRequestModel) throw new Error('Model not loaded: image_request');
-  const imageRequestHistoryModel = defaultSequelize.models['image_request_history'];
-  if (!imageRequestHistoryModel) throw new Error('Model not loaded: image_request_history');
-
   const model = getEntityModel();
   const detailsField = getDetailsField();
 
   return executeOperation(
     async () => {
-      const matchingRequests = await imageRequestModel.findAll({
-        where: Sequelize.where(
-          Sequelize.literal(`"image_request_details"->'requestedVariants'`),
-          Op.contains,
-          Sequelize.cast(JSON.stringify([{ componentSetId }]), 'jsonb')
-        ),
-      });
+      // No Sequelize model for image_request in this repo — read/written via raw parameterized
+      // SQL against the shared pim_local table, same treatment as component_set.
+      const matchingRequests = await defaultSequelize.query(
+        `SELECT image_request_id, image_request_details, status, api_version
+         FROM image_request
+         WHERE image_request_details->'requestedVariants' @> :variant::jsonb`,
+        { replacements: { variant: JSON.stringify([{ componentSetId }]) }, type: defaultSequelize.QueryTypes.SELECT }
+      );
 
       const createdFor = [];
       const alreadyExistedFor = [];
@@ -597,28 +537,40 @@ async function handleCadFileUploaded(componentSetId, cadFilePath, logContext = {
         const variant = (details.requestedVariants || []).find(v => v.componentSetId === componentSetId);
         if (!variant) continue; // shouldn't happen given the containment match above, but don't trust it blindly
 
-        // Manager decision 2026-09-17: this path (a plain FG-CAD shared-drive path string the CAD
-        // user pastes in — no cloud upload anywhere in this flow) belongs on the variant itself
-        // inside the visualization request, NOT on CAD's own component_set (master data) — the
-        // visualization team needs to see the actual document reference while working a variant,
-        // not just a flag. Its presence IS the "uploaded" signal (no separate boolean). Sets it on
-        // every entry matching this componentSetId (it can legitimately appear more than once in the same basket with
-        // different colour selections). Builds a NEW array rather than mutating `details` in
-        // place, so the history row below still captures the pre-update state.
+        // Builds a new array rather than mutating `details` in place, so the history row below
+        // still captures the pre-update state.
         const updatedRequestedVariants = (details.requestedVariants || []).map(v =>
           v.componentSetId === componentSetId && v.cadFilePath !== cadFilePath
             ? { ...v, cadFilePath }
             : v
         );
         if (!_.isEqual(updatedRequestedVariants, details.requestedVariants)) {
-          await imageRequestHistoryModel.create({
-            image_request_id: req.image_request_id,
-            image_request_details: details,
-            updated_fields: ['requestedVariants'],
-            status: req.status,
-            api_version: req.api_version,
-          });
-          await req.update({ image_request_details: { ...details, requestedVariants: updatedRequestedVariants } });
+          await defaultSequelize.query(
+            `INSERT INTO image_request_history
+               (image_request_id, image_request_details, updated_fields, status, api_version, created_at, updated_at)
+             VALUES (:id, :details::jsonb, :updatedFields::jsonb, :status, :apiVersion, NOW(), NOW())`,
+            {
+              replacements: {
+                id: req.image_request_id,
+                details: JSON.stringify(details),
+                updatedFields: JSON.stringify(['requestedVariants']),
+                status: req.status,
+                apiVersion: req.api_version,
+              },
+              type: defaultSequelize.QueryTypes.INSERT,
+            }
+          );
+          await defaultSequelize.query(
+            `UPDATE image_request SET image_request_details = :newDetails::jsonb, updated_at = NOW()
+             WHERE image_request_id = :id`,
+            {
+              replacements: {
+                id: req.image_request_id,
+                newDetails: JSON.stringify({ ...details, requestedVariants: updatedRequestedVariants }),
+              },
+              type: defaultSequelize.QueryTypes.UPDATE,
+            }
+          );
         }
 
         const existingTask = await model.findOne({
@@ -658,17 +610,10 @@ async function handleCadFileUploaded(componentSetId, cadFilePath, logContext = {
 }
 
 // --------------------
-// POST /:id/images — appends one or more already-uploaded image URLs to this task's
-// `uploadedImages`. Render (rn) stage only — image sets are the render stage's deliverable, zb/obj
-// tasks have nothing to attach an image to. Deliberately NOT routed through the generic update()
-// for the same reason image_request's addRequestedVariant isn't: lodash _.merge merges arrays
-// index-by-index rather than appending, which would corrupt this list on a second upload.
-// Same validate-before-executeOperation() pattern as performAction, for the same reason
-// (queryExecutor.js discards a custom `.status` on any error it doesn't recognize).
-//
-// Visualization never touches raw file bytes here — by the time this is called, bff-for-app's
-// imageUpload.service.js pre-hook has already turned whatever the client sent (base64/multipart)
-// into real S3/GCS URLs (see RULES.md/GAPS.md); this function only ever stores plain URL strings.
+// POST /:id/images — appends uploaded image URLs to this task's `uploadedImages`. Render (rn)
+// stage only. Not routed through the generic update(): lodash _.merge merges arrays index-by-index
+// rather than appending, which would corrupt this list on a second upload. Validates before
+// executeOperation() for the same reason as performAction.
 // --------------------
 async function addUploadedImages(id, imageUrls, logContext = {}) {
   const model = getEntityModel();
