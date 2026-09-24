@@ -71,7 +71,13 @@ const convertJsonSchemaToJoi = (jsonSchema) => {
     return joiObj;
   };
 
-  return Joi.object(convertProperties(jsonSchema.properties || {}, jsonSchema.required || []));
+  // created_by/updated_by are real top-level columns, not part of the details blob, so they're never
+  // in entitySchema.json's own properties — allow them explicitly or Joi rejects them as unknown keys.
+  return Joi.object({
+    ...convertProperties(jsonSchema.properties || {}, jsonSchema.required || []),
+    created_by: Joi.string().allow('', null),
+    updated_by: Joi.string().allow('', null),
+  });
 };
 
 // --------------------

@@ -245,6 +245,7 @@ async function update(id, payload, logContext = {}) {
       await entity.update({
         [detailsField]: mergedDetails,
         api_version: version,
+        updated_by: payload.updated_by || entity.updated_by,
       });
 
       logger.debug({
