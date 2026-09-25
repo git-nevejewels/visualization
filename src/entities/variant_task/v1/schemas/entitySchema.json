@@ -48,17 +48,29 @@
       "additionalProperties": { "type": "string" },
       "description": "The DIMENSIONAL axis values that matched this componentSetId (axis id -> chosen value), e.g. {\"size\":\"M\",\"depth\":\"2.0mm\"}. Wireframe field: sel. Axis ids vary per base design, so this is intentionally open-ended."
     },
-    "metalColourGroups": {
+    "metalImageGroups": {
       "type": "array",
-      "minItems": 1,
-      "items": { "type": "string", "enum": ["white", "yellow", "rose"] },
-      "description": "Metal colour groups selected at request time — never affects the matched variant, only the render task's image set count. Wireframe field: groups."
+      "items": {
+        "type": "object",
+        "properties": {
+          "imageText": { "type": "string" },
+          "metalNames": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["imageText", "metalNames"]
+      },
+      "description": "Only set on an rn-stage task (zb/obj never carry this — colour doesn't change geometry). One entry per distinct real imageText value from the metal master table, each listing which of the base design's metal options share it (e.g. Platinum/Silver/White Gold all sharing imageText 'white' collapse into one group, one image)."
     },
-    "stoneColours": {
+    "stoneImageGroups": {
       "type": "array",
-      "minItems": 1,
-      "items": { "type": "string" },
-      "description": "Stone colours/types selected at request time (e.g. Diamond, Ruby). Wireframe field: stones."
+      "items": {
+        "type": "object",
+        "properties": {
+          "imageCode": { "type": "string" },
+          "stoneNames": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["imageCode", "stoneNames"]
+      },
+      "description": "Only set on an rn-stage task, same reasoning as metalImageGroups. One entry per distinct real imageCode from the stone master table, among the stone types this matched geometry covers (e.g. Natural Diamond and Lab Diamond sharing one imageCode collapse into one group, one image)."
     },
     "assignee": {
       "type": "string",
@@ -93,8 +105,6 @@
     "stoneTeamId",
     "stoneTeamCode",
     "stage",
-    "dimensionalSelection",
-    "metalColourGroups",
-    "stoneColours"
+    "dimensionalSelection"
   ]
 }

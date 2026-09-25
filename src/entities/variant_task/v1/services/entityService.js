@@ -364,6 +364,23 @@ function computeTransition(action, stage, currentStatus, details = {}) {
   return { status: 'Completed', isComplete: true };
 }
 
+// Merchandising computes metalImageGroups/stoneImageGroups once, at image_request create time
+// (it has in-process access to base_design/metal/stone; this repo doesn't and never calls
+// Merchandising's API). For the rn stage only, read that already-computed data straight off
+// image_request's own requestedVariants — same raw-SQL-against-the-shared-DB read this file
+// already does elsewhere for image_request, not a new dependency.
+async function fetchImageGroupsForRnStage(imageRequestId, componentSetId) {
+  const [row] = await defaultSequelize.query(
+    `SELECT image_request_details->'requestedVariants' AS "requestedVariants" FROM image_request WHERE image_request_id = :imageRequestId`,
+    { replacements: { imageRequestId }, type: defaultSequelize.QueryTypes.SELECT }
+  );
+  const variant = (row?.requestedVariants || []).find(v => v.componentSetId === componentSetId);
+  return {
+    metalImageGroups: variant?.metalImageGroups || [],
+    stoneImageGroups: variant?.stoneImageGroups || [],
+  };
+}
+
 // On completing a stage, auto-create the next stage's task for the same variant
 // — unless one already exists (guards a double-complete race) or the completed
 // stage was the last one (render — nothing follows it). New task always starts
@@ -396,12 +413,18 @@ async function createNextStageTaskIfNeeded(completedDetails, logContext = {}) {
     stoneTeamCode: completedDetails.stoneTeamCode,
     stage: nextStage,
     dimensionalSelection: completedDetails.dimensionalSelection,
-    metalColourGroups: completedDetails.metalColourGroups,
-    stoneColours: completedDetails.stoneColours,
     priority: completedDetails.priority,
     neededBy: completedDetails.neededBy,
     status: 'Ready',
   };
+
+  // Metal/stone colour only matters at the render stage — zb/obj build the same geometry
+  // regardless of colour, so they never carry this at all.
+  if (nextStage === 'rn') {
+    const { metalImageGroups, stoneImageGroups } = await fetchImageGroupsForRnStage(completedDetails.imageRequestId, completedDetails.componentSetId);
+    nextDetails.metalImageGroups = metalImageGroups;
+    nextDetails.stoneImageGroups = stoneImageGroups;
+  }
 
   const created = await model.create({
     [detailsField]: nextDetails,
@@ -592,8 +615,6 @@ async function handleCadFileUploaded(componentSetId, cadFilePath, logContext = {
           stoneTeamCode: variant.stoneTeamCode,
           stage: 'zb',
           dimensionalSelection: variant.dimensionalSelection,
-          metalColourGroups: variant.metalColourGroups,
-          stoneColours: variant.stoneColours,
           priority: details.priority,
           neededBy: details.neededBy,
         }, logContext);
